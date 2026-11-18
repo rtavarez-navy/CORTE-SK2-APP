@@ -17,10 +17,12 @@ from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from web import cpa, production as ledger
 
+WEB_ROOT = Path(__file__).parent
 INITIAL_PASSWORD = "12345"
 ROLES = {"developer": "Desarrollador", "supervisor": "Supervisor", "operator": "Operador"}
 ZONE = ZoneInfo("America/Santo_Domingo")
@@ -123,6 +125,7 @@ async def lifespan(_app):
 
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app.mount("/static", StaticFiles(directory=WEB_ROOT / "static"), name="static")
 
 
 @app.middleware("http")
@@ -131,7 +134,7 @@ async def headers(request, call_next):
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Content-Security-Policy"] = (
-        "default-src 'none'; style-src 'self'; form-action 'self'; "
+        "default-src 'none'; style-src 'self'; img-src 'self'; font-src 'self'; script-src 'self'; form-action 'self'; "
         "frame-ancestors 'none'; base-uri 'none'"
     )
     return response
@@ -157,20 +160,36 @@ def form(action, csrf, fields):
     return f'<form method="post" action="/{action}">{hidden("csrf", csrf)}{fields}</form>'
 
 
-def page(title, content, error="", status=200, wide=False):
+def page(title, content, error="", status=200, layout="login", header_actions=""):
     alert = f'<p role="alert" class="alert">{escape(error)}</p>' if error else ""
     return HTMLResponse(f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{escape(title)} · Corte SK2</title><link rel="stylesheet" href="/style.css">
-</head><body><main class="{'dashboard' if wide else 'login'}">
-<header><a href="/" class="brand"><span class="mark" aria-hidden="true">✳</span> CORTE <strong>SK2</strong></a></header>
-{alert}{content}</main></body></html>""", status)
+<link rel="icon" type="image/png" sizes="32x32" href="/static/favicon.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/favicon-180.png">
+{('<script src="/static/report.js" defer></script>' if layout == 'report' else '')}
+</head><body class="{layout}">
+<header class="site-header"><div class="frame header-inner">
+    <a href="/" class="brand">
+        <img src="/static/logo-mark.png" width="40" height="40" alt="">
+        <span><strong>CORTE SAKIRA 2</strong><small>&amp; Proyecto Ámbar</small></span>
+    </a>{header_actions}
+</div></header>
+<main class="frame">{alert}{content}</main></body></html>""", status)
 
 
 @app.get("/style.css")
 def stylesheet():
-    return FileResponse(Path(__file__).with_name("style.css"), media_type="text/css")
+    return FileResponse(WEB_ROOT / "style.css", media_type="text/css")
+
+
+def login_layout(content):
+    return f"""<div class="auth-layout">
+        <img class="full-logo" src="/static/logo-full.png"
+             alt="CORTE SAKIRA 2 y Proyecto Ámbar" width="768" height="416">
+        <section class="auth-panel">{content}</section>
+    </div>"""
 
 
 def render(request, error="", status=200, query=None):
@@ -186,13 +205,13 @@ def render(request, error="", status=200, query=None):
                 <p>Solicita el restablecimiento a tu supervisor e indícale tu código de empleado.
                 Si eres supervisor, solicítalo al desarrollador. Cuando te confirmen el cambio,
                 entra con la clave temporal y elige una nueva.</p></details>"""
-            response = page("Inicio de sesión", contents, error, status)
+            response = page("Inicio de sesión", login_layout(contents), error, status)
         elif user["pending"]:
             contents = '<h1>Cambia tu contraseña</h1><p>Usa al menos 8 caracteres para continuar.</p>' + form("password", csrf, """
                 <label>Nueva contraseña<input type="password" name="password" autocomplete="new-password" minlength="8" maxlength="128" required></label>
                 <label>Confirmar contraseña<input type="password" name="confirm" autocomplete="new-password" minlength="8" maxlength="128" required></label>
                 <button>Guardar y continuar</button>""") + form("logout", csrf, '<button class="quiet">Cerrar sesión</button>')
-            response = page("Primer acceso", contents, error, status)
+            response = page("Primer acceso", login_layout(contents), error, status)
         else:
             response = dashboard(db, request, user, csrf, error, status, query)
     if not request.cookies.get("corte_csrf"):
@@ -221,22 +240,25 @@ def dashboard(db, request, user, csrf, error, status, query=None):
     pending = db.execute("""
         SELECT * FROM production WHERE review = 'pending' AND deleted_at IS NULL ORDER BY day, rowid
     """).fetchall() if not operator else []
-    toolbar = f"""<div class="toolbar"><div><p class="eyebrow">CORTE · SAKIRA 2</p>
-        <h1>{'Mi producción' if operator else 'Control de producción'}</h1>
-        <p>{escape(user['name'])} · {ROLES[user['role']]} · {day}</p></div>
-        {form('logout', csrf, '<button class="quiet">Cerrar sesión</button>')}</div>"""
+    logout = form("logout", csrf, '<button class="quiet">Cerrar sesión</button>')
+    identity = f"{escape(user['name'])} · {ROLES[user['role']]}"
     if operator:
-        mine = [row for row in slots if row["employee"] == user["code"]]
-        if not mine:
-            body = '<section><h2>Esperando asignación</h2><p>Tu supervisor te asignará un láser y un turno.</p><p><a href="/">Actualizar asignación</a></p></section>'
+        current = next((row for row in slots if row["employee"] == user["code"]), None)
+        if not current:
+            body = """<section><h1>Esperando asignación</h1>
+                <p>Tu supervisor te asignará un láser y un turno.</p>
+                <a class="text-action" href="/">Actualizar asignación</a></section>"""
+            header_actions = logout
         else:
-            current = mine[0]
+            shift, number = current["shift"], current["laser"]
+            station = f"Láser {number} · Turno {shift}"
+            header_actions = f'<span class="station-context">{station}</span>{logout}'
             rows = db.execute("""
                 SELECT * FROM production WHERE day = ? AND shift = ? AND laser = ? AND deleted_at IS NULL
                 ORDER BY rowid
-            """, (day, current["shift"], current["laser"])).fetchall()
-            body = laser_report(db, day, current["shift"], current["laser"], [current], rows, staff, user, csrf, query)
-        return page("Mi producción", toolbar + body, error, status, wide=True)
+            """, (day, shift, number)).fetchall()
+            body = laser_report(db, day, shift, number, [current], rows, staff, user, csrf, query)
+        return page("Estación", body, error, status, "station", header_actions)
 
     date_suffix = "&fecha=" + day if day != current_day else ""
     links = [
@@ -248,70 +270,90 @@ def dashboard(db, request, user, csrf, error, status, query=None):
     ]
     selected = f"turno{shift}" if view == "turno" else view
     nav = '<nav aria-label="Secciones">' + "".join(
-        f'<a href="{url.replace("&", "&amp;")}" {"aria-current=page" if key == selected else ""}>{label}</a>'
+        f'<a href="{escape(url)}" {"aria-current=page" if key == selected else ""}>{label}</a>'
         for key, url, label in links
     ) + '</nav>'
+    layout = "dashboard"
     if view == "personal":
+        title = "Personal"
         body = accounts_panel(db, user, csrf) + reprints_panel(db, csrf)
     elif view == "avisos":
+        title = "Notificaciones"
         body = notifications(db, waiting, pending, staff, csrf)
     else:
-        production = db.execute("SELECT * FROM production WHERE day = ? AND deleted_at IS NULL ORDER BY rowid", (day,)).fetchall()
+        production = db.execute(
+            "SELECT * FROM production WHERE day = ? AND deleted_at IS NULL ORDER BY rowid", (day,)
+        ).fetchall()
         if view == "turno":
             laser = query.get("laser", "")
             if laser in {str(number) for number in range(1, 12)}:
                 number = int(laser)
-                body = (f'<p><a href="/?vista=turno&amp;turno={shift}{escape(date_suffix)}">← Láseres del turno {shift}</a></p>'
-                        + laser_report(
-                            db, day, shift, number,
-                            [row for row in slots if row["shift"] == shift and row["laser"] == number],
-                            [row for row in production if row["shift"] == shift and row["laser"] == number],
-                            staff, user, csrf, query))
+                title = f"Reporte · Láser {number}"
+                layout = "report"
+                back = f'<a class="text-action" href="/?vista=turno&amp;turno={shift}{escape(date_suffix)}">← Láseres del turno {shift}</a>'
+                body = laser_report(
+                    db, day, shift, number,
+                    [row for row in slots if row["shift"] == shift and row["laser"] == number],
+                    [row for row in production if row["shift"] == shift and row["laser"] == number],
+                    staff, user, csrf, query, back)
             else:
-                body = shift_grid(shift, slots, production, staff, date_suffix)
+                title = f"Láseres del turno {shift}"
+                body = shift_grid(shift, slots, production, staff, date_suffix, heading=False)
         else:
-            body = overview(slots, production, len(pending), len(waiting), day)
+            title = "Resumen de producción"
+            body = overview(slots, production, len(pending), current_day, day, staff, date_suffix)
+    if layout == "report":
+        return page(title, nav + body, error, status, layout, logout)
+
+    date_filter = ""
     if view in ("panel", "turno"):
-        filter_fields = hidden("vista", view) + hidden("turno", shift)
-        if query.get("laser"):
-            filter_fields += hidden("laser", query["laser"])
-        date_filter = f"""<form class="report-filter" method="get" action="/">{filter_fields}
+        date_filter = f"""<form class="report-filter" method="get" action="/">
+            {hidden("vista", view)}{hidden("turno", shift)}
             <label>Fecha de producción<input name="fecha" type="date" value="{day}" required></label>
-            <button>Ver fecha</button></form>"""
-        body = date_filter + body
-    return page("Control de producción", toolbar + nav + body, error, status, wide=True)
+            <button class="quiet">Ver fecha</button></form>"""
+    heading = f'<div class="page-heading"><div><h1>{title}</h1><p>{identity}</p></div>{date_filter}</div>'
+    return page(title, nav + heading + body, error, status, layout, logout)
 
 
-def overview(slots, production, duplicate_count, waiting_count, day):
+def overview(slots, production, duplicate_count, current_day, day, staff, date_suffix):
     units = {shift: sum(row["pieces"] for row in production
                         if row["shift"] == shift and row["review"] == "approved") for shift in (1, 2)}
-    machines = {(row["shift"], row["laser"]) for row in slots}
-    maximum = max(1, *units.values())
-    bars = "".join(f"""<div class="bar-row"><strong>Turno {shift}</strong>
-        <progress value="{units[shift]}" max="{maximum}" aria-label="Piezas del turno {shift}"></progress>
-        <span>{units[shift]:,} piezas</span></div>""" for shift in (1, 2))
-    return f"""<div class="metrics">
-        <article><p>Piezas confirmadas</p><strong>{sum(units.values()):,}</strong></article>
-        <article><p>Láseres con personal</p><strong>{len(machines)} / 22</strong><p>Entre ambos turnos</p></article>
-        <article><p>Órdenes por revisar</p><strong>{duplicate_count}</strong></article>
-        <article><p>Operarios sin asignar</p><strong>{waiting_count}</strong></article></div>
-        <section><h2>Producción por turno · {day}</h2>{bars}</section>"""
+    duplicate_notice = ""
+    if duplicate_count:
+        noun = "Duplicado pendiente" if duplicate_count == 1 else "Duplicados pendientes"
+        duplicate_notice = f"""<div class="alert notice-row">
+            <strong>{duplicate_count} · {noun}</strong>
+            <a class="text-action" href="/?vista=avisos">Revisar duplicados</a></div>"""
+    metrics = [
+        ("Piezas hoy" if day == current_day else "Piezas confirmadas", sum(units.values())),
+        ("Turno 1", units[1]),
+        ("Turno 2", units[2]),
+        ("Por revisar", duplicate_count),
+    ]
+    cards = "".join(f'<article><p>{label}</p><strong class="number">{value:,}</strong></article>'
+                    for label, value in metrics)
+    grids = "".join(shift_grid(shift, slots, production, staff, date_suffix) for shift in (1, 2))
+    return f'<div class="metrics">{cards}</div>{duplicate_notice}{grids}'
 
 
-def shift_grid(shift, slots, production, staff, date_suffix):
+def shift_grid(shift, slots, production, staff, date_suffix, heading=True):
     cards = []
     for laser in range(1, 12):
         operators = [row["employee"] for row in slots if row["shift"] == shift and row["laser"] == laser]
-        names = ", ".join(escape(staff.get(code, code)) for code in operators) or "Sin personal"
+        names = ", ".join(escape(staff.get(code, code)) for code in operators)
         pieces = sum(row["pieces"] for row in production
                      if row["shift"] == shift and row["laser"] == laser and row["review"] == "approved")
-        cards.append(f"""<a class="laser-card" href="/?vista=turno&amp;turno={shift}&amp;laser={laser}{escape(date_suffix)}">
-            <strong>Láser {laser:02}</strong><span class="pill">{len(operators)} / 2</span>
-            <p>{names}</p><b>{pieces:,} piezas</b></a>""")
-    return f'<h2>Turno {shift} · Láseres</h2><div class="laser-grid">{"".join(cards)}</div>'
+        staffing = ("Sin operario", "1 operario", "2 operarios")[len(operators)]
+        operator_names = f"<p>{names}</p>" if names else ""
+        cards.append(f"""<a class="laser-card staffing-{len(operators)}"
+            href="/?vista=turno&amp;turno={shift}&amp;laser={laser}{escape(date_suffix)}">
+            <div class="machine"><strong>Láser {laser}</strong><span class="staff-status">{staffing}</span></div>
+            <p class="laser-pieces"><b class="number">{pieces:,}</b> piezas</p>{operator_names}</a>""")
+    title = f"<h2>Turno {shift}</h2>" if heading else ""
+    return f'<section class="shift-section">{title}<div class="laser-grid">{"".join(cards)}</div></section>'
 
 
-def laser_report(db, day, shift, laser, slots, rows, staff, user, csrf, query):
+def laser_report(db, day, shift, laser, slots, rows, staff, user, csrf, query, back=""):
     scope = hidden("day", day) + hidden("shift", shift) + hidden("laser", laser)
     operator = user["role"] == "operator"
     assignment = ""
@@ -328,7 +370,8 @@ def laser_report(db, day, shift, laser, slots, rows, staff, user, csrf, query):
     totals = sum(row["pieces"] for row in rows if row["review"] == "approved")
     counts = ledger.report_counts(db, rows, shift, laser)
     search = query.get("orden", "").strip()[:80]
-    selected = [row for row in rows if search.upper() in row["order_line"]
+    search_key = re.sub(r"[\s/]+", "", search.upper()).removeprefix("SO-")
+    selected = [row for row in rows if search_key in row["order_line"]
                 or search.upper() in row["reference"].upper()]
     report = "".join(report_row(row, counts.get(row["order_line"]), user, csrf, scope)
                      for row in selected)
@@ -339,12 +382,34 @@ def laser_report(db, day, shift, laser, slots, rows, staff, user, csrf, query):
             options = "".join(f'<option value="{escape(row["employee"])}">{escape(row["employee"])}</option>'
                               for row in slots)
             picker = f'<label>Operario<select name="employee">{options}</select></label>'
-        capture = '<div class="capture"><h3>Registrar producción</h3>' + form(
-            "production", csrf, scope + hidden("id", token_hex(16)) + picker
-            + production_fields() + '<button>Registrar</button>') + '</div>'
-    report = report or '<tr><td colspan="13">Sin registros para esta búsqueda.</td></tr>'
-    search_fields = (hidden("vista", "turno") + hidden("turno", shift)
-                     + hidden("laser", laser) + hidden("fecha", day))
+        saved_id = query.get("guardado")
+        saved = next((row for row in rows if row["id"] == saved_id
+                      and row["recorded_by"] == user["code"]), None)
+        notice = ""
+        if saved and saved["review"] == "pending":
+            notice = (f'<p class="alert" role="status"><strong>Duplicado.</strong> '
+                      f'La orden {escape(saved["order_number"])} · línea {escape(saved["line"])} '
+                      'quedó pendiente. Espera la revisión del supervisor.</p>')
+        elif saved and saved["review"] == "approved":
+            notice = '<p class="confirmation" role="status">Pieza guardada.</p>'
+        capture = '<section class="capture"><h2>Captura de piezas</h2>' + notice + form(
+            "production", csrf, scope + hidden("id", token_hex(16))
+            + production_fields() + picker + '<button>Guardar pieza</button>') + '</section>'
+    empty_message = "Sin registros para esta búsqueda." if search else "Sin registros en esta fecha y turno."
+    report = report or f'<tr><td colspan="13">{empty_message}</td></tr>'
+    report_scope = hidden("vista", "turno") + hidden("laser", laser)
+    date_shift = ""
+    if not operator:
+        shift_options = "".join(
+            f'<option value="{n}" {"selected" if n == shift else ""}>Turno {n}</option>' for n in (1, 2))
+        date_shift = f"""<label>Fecha de producción<input name="fecha" type="date" value="{day}" required></label>
+            <label>Turno<select name="turno">{shift_options}</select></label>"""
+    else:
+        date_shift = hidden("fecha", day) + hidden("turno", shift)
+    filters = f"""<form class="report-filter" method="get" action="/">
+        {report_scope}{date_shift}
+        <label>Buscar orden<input type="search" name="orden" value="{escape(search)}" maxlength="80"></label>
+        <button class="quiet">{"Buscar" if operator else "Aplicar filtros"}</button></form>"""
     history = audit_panel(db, user, query.get("historial"), day, shift, laser)
     deleted_sql = "SELECT * FROM production WHERE day = ? AND shift = ? AND laser = ? AND deleted_at IS NOT NULL"
     deleted_args = (day, shift, laser)
@@ -355,25 +420,38 @@ def laser_report(db, day, shift, laser, slots, rows, staff, user, csrf, query):
         f'<li>{audit_link(row, row["reference"])}</li>' for row in db.execute(deleted_sql, deleted_args))
     deleted = (f'<details><summary>Registros eliminados</summary><ul>{deleted_links}</ul></details>'
                if deleted_links else "")
-    return f"""<section><h2>Láser {laser:02} · Turno {shift}</h2>
-        <p>{day} · {totals:,} piezas confirmadas</p>{assignment}{cpa_panel(search_fields, query.get("consulta_cpa"))}{capture}
-        <form class="report-filter" method="get" action="/">{search_fields}
-        <label>Buscar orden<input name="orden" value="{escape(search)}" maxlength="80"></label>
-        <button>Buscar</button></form>
-        <div class="sheet production-sheet"><table aria-label="Reporte del láser {laser}"><thead><tr>
-        <th>Fecha</th><th># de orden</th><th>Línea</th><th># piezas</th><th>Comentarios</th>
-        <th>Reprint</th><th>Orden + Línea</th><th>Repeticiones</th><th>SKU</th><th>CPA (Supervisor)</th>
-        <th>Dup.</th><th>Operario</th><th>Estado y acciones</th>
-        </tr></thead><tbody>{report}</tbody></table></div>{deleted}{history}</section>"""
+    title = f"Láser {laser} · Turno {shift}"
+    heading = f"""<div class="page-heading"><div>{back}<h1>{title}</h1>
+        <p>{day} · {totals:,} piezas confirmadas</p>
+        {f'<p>Orden buscada: {escape(search)}</p>' if search else ''}</div>
+        {'' if operator else '<button class="quiet print-button" type="button" hidden>Imprimir reporte</button>'}</div>"""
+    if assignment:
+        assignment = f'<details class="assignment"><summary>Asignar operarios</summary>{assignment}</details>'
+    cpa_scope = report_scope + hidden("fecha", day) + hidden("turno", shift) + hidden("orden", search)
+    cpa_lookup = cpa_panel(cpa_scope, query.get("consulta_cpa"))
+    return f"""{heading}{capture}
+        <section class="report-section"><div class="report-tools">{filters}{assignment}</div>
+        <div class="sheet production-sheet" tabindex="0" role="region" aria-label="Tabla de producción">
+        <table aria-label="Reporte del láser {laser}"><thead><tr>
+        <th scope="col">FECHA</th><th scope="col"># DE ORDEN</th><th scope="col">LINEA</th>
+        <th scope="col" class="number"># PIEZAS</th><th scope="col">COMENTARIOS</th>
+        <th scope="col">* REPRINT *</th><th scope="col">Orden + Linea</th>
+        <th scope="col" class="number">REPETICIONES</th><th scope="col">SKU</th><th scope="col">CPA (SUPERVISOR)</th>
+        <th scope="col" class="number">DUP.</th><th scope="col">Operario</th><th scope="col">Estado y acciones</th>
+        </tr></thead><tbody>{report}</tbody><tfoot><tr>
+        <th scope="row" colspan="3">Total del día · Turno {shift}</th>
+        <td class="number">{totals:,}</td><td colspan="9">Piezas confirmadas</td>
+        </tr></tfoot></table></div>{cpa_lookup}{deleted}{history}</section>"""
 
 
 def cpa_panel(scope, query):
+    value = (query or "")[:40]
     result = ""
     if query is not None:
         try:
             rows = cpa.lookup(query)
         except (ValueError, cpa.CpaUnavailable) as exc:
-            result = f'<p role="status">{escape(str(exc))}</p>'
+            result = f'<p class="alert" role="status">{escape(str(exc))}</p>'
         else:
             body = "".join(
                 f"<tr><td>{escape(row.order)}</td><td>{escape(row.set or '—')}</td>"
@@ -381,32 +459,34 @@ def cpa_panel(scope, query):
                 for row in rows
             )
             if body:
-                result = f"""<div class="sheet"><table aria-label="Resultados de CPA">
-                    <thead><tr><th>Orden</th><th>Set</th><th>Piezas</th><th>Estado de línea</th></tr></thead>
-                    <tbody>{body}</tbody></table></div>"""
+                result = f"""<div class="sheet"><table aria-label="Resultados de CPA"><thead><tr>
+                    <th>Orden</th><th>Set</th><th class="number">Cantidad CPA</th><th>Estado de línea</th>
+                    </tr></thead><tbody>{body}</tbody></table></div>"""
             else:
                 result = '<p role="status">CPA no devolvió líneas para esa orden y Set en JuiceSakira2.</p>'
-    return f"""<div id="consulta-cpa" class="cpa-lookup"><h3>Consultar orden en CPA</h3>
-        <form class="report-filter" method="get" action="/#consulta-cpa">{scope}
-        <label>Orden y línea<input name="consulta_cpa" value="{escape((query or '')[:40])}"
+    return f"""<details class="cpa-lookup" id="consulta-cpa" {'open' if query is not None else ''}>
+        <summary>Consultar orden en CPA</summary>
+        <form method="get" action="/#consulta-cpa">{scope}
+        <label>Orden y línea<input name="consulta_cpa" value="{escape(value)}"
         placeholder="3986055 A" maxlength="40" required></label>
-        <button>Buscar en CPA</button></form>{result}</div>"""
+        <button>Buscar en CPA</button></form>{result}</details>"""
 
 
 def production_fields(row=None):
     values = dict(row) if row is not None else {}
     def value(key):
         return escape(str(values.get(key, "")))
-    return f"""<label># de orden<input name="order_number" value="{value('order_number')}"
+    return f"""<label class="field-order">Orden<input name="order_number" value="{value('order_number')}"
         inputmode="numeric" maxlength="27" required></label>
-        <label>Línea<input name="line" value="{value('line')}" maxlength="12" required></label>
-        <label>Piezas<input name="pieces" type="number" value="{value('pieces')}" min="1" max="100000" required></label>
-        <label>SKU<input name="sku" value="{value('sku')}" maxlength="60"></label>
-        <label>Comentarios<input name="comments" value="{value('comments')}" maxlength="300"></label>"""
+        <label class="field-line">Línea<input name="line" value="{value('line')}" autocapitalize="characters" maxlength="12" required></label>
+        <label class="field-pieces">Piezas<input name="pieces" type="number" value="{value('pieces')}" min="1" max="100000" required></label>
+        <label class="field-comments">Comentario<input name="comments" value="{value('comments')}" maxlength="300"></label>
+        <label class="field-sku">SKU<input name="sku" value="{value('sku')}" maxlength="60"></label>"""
 
 
 def report_row(row, counts, user, csrf, scope):
-    statuses = {"approved": "Confirmado", "pending": "Por revisar", "rejected": "Descartado"}
+    statuses = {"approved": "Confirmado", "pending": "Duplicado · Por revisar", "rejected": "Descartado"}
+    colleague = user["role"] == "operator" and row["employee"] != user["code"]
     controls = ""
     if user["role"] == "developer" or (user["role"] == "operator" and row["employee"] == user["code"]):
         key = scope + hidden("record", row["id"])
@@ -416,13 +496,14 @@ def report_row(row, counts, user, csrf, scope):
     link = ""
     if user["role"] != "operator" or row["employee"] == user["code"]:
         link = audit_link(row, "Historial")
-    return f"""<tr><td>{escape(row['day'])}</td><td>{escape(row['order_number'])}</td>
-        <td>{escape(row['line'])}</td><td>{row['pieces']:,}</td><td>{escape(row['comments'])}</td>
+    actions = f'<details class="row-actions"><summary>Acciones</summary>{controls}{link}</details>' if controls or link else ""
+    return f"""<tr{' class="colleague"' if colleague else ''}><td>{escape(row['day'])}</td><td>{escape(row['order_number'])}</td>
+        <td>{escape(row['line'])}</td><td class="number">{row['pieces']:,}</td><td>{escape(row['comments'])}</td>
         <td>{'*' if counts and counts['reprint'] else ''}</td>
-        <td>{escape(row['order_line'])}</td><td>{counts['local'] if counts else 0}</td>
-        <td>{escape(row['sku'])}</td><td>—</td><td>{counts['total'] if counts else 0}</td>
+        <td>{escape(row['order_line'])}</td><td class="number">{counts['local'] if counts else 0}</td>
+        <td>{escape(row['sku'])}</td><td>—</td><td class="number">{counts['total'] if counts else 0}</td>
         <td>{escape(row['employee'])}</td><td><span class="pill {row['review']}">{statuses[row['review']]}</span>
-        {controls}{link}</td></tr>"""
+        {actions}</td></tr>"""
 
 
 def audit_link(row, label):
@@ -769,6 +850,9 @@ def handle_mutation(action, request, data):
                 change_production(db, user, data, action)
             elif action == "production" and user["role"] in ("developer", "operator"):
                 record(db, user, data)
+                saved_query = urlencode({"vista": "turno", "turno": int(shift),
+                                         "laser": int(data["laser"]), "guardado": data["id"]})
+                response.headers["location"] = f"/?{saved_query}"
             else:
                 raise HTTPException(403)
     except sqlite3.IntegrityError:
