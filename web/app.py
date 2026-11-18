@@ -19,7 +19,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
-from web import production as ledger
+from web import cpa, production as ledger
 
 INITIAL_PASSWORD = "12345"
 ROLES = {"developer": "Desarrollador", "supervisor": "Supervisor", "operator": "Operador"}
@@ -356,7 +356,7 @@ def laser_report(db, day, shift, laser, slots, rows, staff, user, csrf, query):
     deleted = (f'<details><summary>Registros eliminados</summary><ul>{deleted_links}</ul></details>'
                if deleted_links else "")
     return f"""<section><h2>Láser {laser:02} · Turno {shift}</h2>
-        <p>{day} · {totals:,} piezas confirmadas</p>{assignment}{capture}
+        <p>{day} · {totals:,} piezas confirmadas</p>{assignment}{cpa_panel(search_fields, query.get("consulta_cpa"))}{capture}
         <form class="report-filter" method="get" action="/">{search_fields}
         <label>Buscar orden<input name="orden" value="{escape(search)}" maxlength="80"></label>
         <button>Buscar</button></form>
@@ -365,6 +365,32 @@ def laser_report(db, day, shift, laser, slots, rows, staff, user, csrf, query):
         <th>Reprint</th><th>Orden + Línea</th><th>Repeticiones</th><th>SKU</th><th>CPA (Supervisor)</th>
         <th>Dup.</th><th>Operario</th><th>Estado y acciones</th>
         </tr></thead><tbody>{report}</tbody></table></div>{deleted}{history}</section>"""
+
+
+def cpa_panel(scope, query):
+    result = ""
+    if query is not None:
+        try:
+            rows = cpa.lookup(query)
+        except (ValueError, cpa.CpaUnavailable) as exc:
+            result = f'<p role="status">{escape(str(exc))}</p>'
+        else:
+            body = "".join(
+                f"<tr><td>{escape(row.order)}</td><td>{escape(row.set or '—')}</td>"
+                f"<td>{escape(row.quantity)}</td><td>{escape(row.status)}</td></tr>"
+                for row in rows
+            )
+            if body:
+                result = f"""<div class="sheet"><table aria-label="Resultados de CPA">
+                    <thead><tr><th>Orden</th><th>Set</th><th>Piezas</th><th>Estado de línea</th></tr></thead>
+                    <tbody>{body}</tbody></table></div>"""
+            else:
+                result = '<p role="status">CPA no devolvió líneas para esa orden y Set en JuiceSakira2.</p>'
+    return f"""<div id="consulta-cpa" class="cpa-lookup"><h3>Consultar orden en CPA</h3>
+        <form class="report-filter" method="get" action="/#consulta-cpa">{scope}
+        <label>Orden y línea<input name="consulta_cpa" value="{escape((query or '')[:40])}"
+        placeholder="3986055 A" maxlength="40" required></label>
+        <button>Buscar en CPA</button></form>{result}</div>"""
 
 
 def production_fields(row=None):

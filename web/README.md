@@ -38,7 +38,7 @@ Se conservan los registros del SQLite existente. La migración separa las refere
 - **Repeticiones** cuenta la clave en el mismo láser y turno. **Dup.** la cuenta en toda la producción de la app. Las dos columnas abarcan los días guardados en la app y excluyen descartes y eliminaciones.
 - Un registro repetido queda pendiente. El supervisor lo confirma o descarta desde Notificaciones. Los totales incluyen solo los confirmados.
 - **Reprint** muestra un asterisco cuando la clave está en Personal → Reprints válidos. El supervisor mantiene ese listado y la autorización no sustituye la revisión de duplicados. Carga allí las autorizaciones del Sheet que sigan vigentes durante el piloto.
-- El SKU y los comentarios se capturan manualmente. La columna **CPA (Supervisor)** queda en espera de integración.
+- El SKU y los comentarios se capturan manualmente. La consulta directa a CPA se hace en la caja del reporte. La columna **CPA (Supervisor)** del registro se reserva para una validación posterior.
 
 ### Actualización y prueba en paralelo
 
@@ -58,3 +58,21 @@ Se conservan los registros del SQLite existente. La migración separa las refere
 python -m pip install httpx
 python -m unittest discover -s tests -v
 ```
+
+
+## Consulta directa a CPA
+
+Desde el reporte del láser, escribe `3986055 A` en **Orden y línea**. La app busca `3986055` en Production Lines y muestra solo el Set `A` de JuiceSakira2. Si omites el Set, muestra las líneas que CPA devuelve para la orden. Sale de la tabla del portal, como consulta de solo lectura.
+
+Para habilitarla, prepara Playwright y Chromium en el servidor que ejecuta CORTE SK2:
+
+```bash
+python -m pip install playwright
+python -m playwright install chromium
+export CORTE_CPA_STATE=/ruta/privada/corte-cpa-session.json
+python -m web.cpa
+```
+
+Ejecuta el último comando en un entorno gráfico con la misma cuenta del sistema que ejecutará la app, inicia sesión en el navegador abierto y pulsa Enter cuando aparezca Production Lines. Usa una cuenta de CPA autorizada para la consulta de producción en Sakira 2. Mantén el archivo de sesión fuera del repositorio y con acceso restringido a esa cuenta del sistema, pues contiene la sesión de CPA.
+
+Arranca Uvicorn con `CORTE_CPA_STATE` apuntando al mismo archivo y un solo worker. Para renovar una sesión vencida, detén la app, vuelve a ejecutar `python -m web.cpa` e inicia el servidor otra vez.
