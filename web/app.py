@@ -356,11 +356,11 @@ def cpa_panel(shift, laser, order):
                 result = f"""<div class="sheet"><table aria-label="Líneas de CPA"><thead>
                     <tr><th>Orden</th><th>Set</th><th>Cantidad CPA</th><th>Estado de línea</th></tr>
                     </thead><tbody>{body}</tbody></table></div>{notice}"""
-    return f"""<details class="recovery" {"open" if order is not None else ""}>
-        <summary>Consultar orden en CPA</summary><form method="get" action="/">
+    return f"""<div class="cpa-lookup">
+        <h3>Consultar orden en CPA</h3><form method="get" action="/">
         {hidden('vista', 'turno')}{hidden('turno', shift)}{hidden('laser', laser)}
-        <label>Número de orden<input name="cpa" value="{escape(value)}" maxlength="32" required></label>
-        <button>Buscar en CPA</button></form>{result}</details>"""
+        <label>Número de orden<input name="cpa" value="{escape(value)}" maxlength="32" placeholder="Ej. SO-1234567" required></label>
+        <button>Buscar en CPA</button></form>{result}</div>"""
 
 
 
