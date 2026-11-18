@@ -207,7 +207,7 @@ Decidido:
 - Columna **Operario** automática y oculta para el operario. **Estado** visible para todos.
 - Cada hoja de láser es la semana en curso. Al cerrar la semana, las filas pasan a la hoja **Historia**.
 - La semana va de lunes a domingo. El supervisor elige la semana a ver con un selector; el operario ve solo la actual.
+- Las pestañas del supervisor muestran todos los láseres que tengan al menos una pieza en la semana que está viendo. Un láser sin piezas esa semana no aparece como pestaña.
 
 Pendiente:
 - [ ] ¿Pegar desde Google Sheets se permite al operario, o solo al supervisor?
-- [ ] ¿Las pestañas de hoja muestran todos los láseres de la semana para el supervisor, o solo el láser seleccionado?
