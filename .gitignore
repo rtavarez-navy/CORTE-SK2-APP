@@ -1,14 +1,5 @@
-.env
-*.db
-*.sqlite*
-*.pyc
 __pycache__/
-.pytest_cache/
 .venv/
-dist/
-build/
-*.spec
-config.json
-*.log
-*.csv
-!sample-data/CPA_EJEMPLO.csv
+*.sqlite3
+*.sqlite3-*
+.env
