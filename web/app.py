@@ -78,13 +78,17 @@ def digest(token):
 def create_employee(db, code, name, role):
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,24}", code) or not 1 <= len(name) <= 80 or role not in ROLES:
         raise ValueError("Revisa el código, el nombre y el rol.")
-    db.execute("INSERT INTO employees VALUES (?, ?, ?, ?, 1)",
+    db.execute("INSERT INTO employees (code, name, role, password, pending) VALUES (?, ?, ?, ?, 1)",
                (code.upper(), name, role, password_hash(INITIAL_PASSWORD)))
 
 
 def setup():
     with database() as db:
         db.executescript(SCHEMA)
+        db.execute("BEGIN IMMEDIATE")
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(employees)")}
+        if "active" not in columns:
+            db.execute("ALTER TABLE employees ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
 
 
 @asynccontextmanager
@@ -116,7 +120,7 @@ def cookie(response, name, value):
 def employee(db, request):
     return db.execute("""
         SELECT e.* FROM sessions s JOIN employees e ON s.employee = e.code
-        WHERE s.token = ? AND s.expires > ?
+        WHERE s.token = ? AND s.expires > ? AND e.active = 1
     """, (digest(request.cookies.get("corte_session", "")), int(time()))).fetchone()
 
 
@@ -153,6 +157,10 @@ def render(request, error="", status=200):
                 <label>Código de empleado<input name="code" autocomplete="username" maxlength="24" required autofocus></label>
                 <label>Contraseña<input type="password" name="password" autocomplete="current-password" maxlength="128" required></label>
                 <button>Entrar</button>""")
+            contents += """<details class="recovery"><summary>Olvidé mi contraseña</summary>
+                <p>Solicita el restablecimiento a tu supervisor e indícale tu código de empleado.
+                Si eres supervisor, solicítalo al desarrollador. Cuando te confirmen el cambio,
+                entra con la clave temporal y elige una nueva.</p></details>"""
             response = page("Inicio de sesión", contents, error, status)
         elif user["pending"]:
             contents = '<h1>Cambia tu contraseña</h1><p>Usa al menos 8 caracteres para continuar.</p>' + form("password", csrf, """
@@ -178,11 +186,14 @@ def dashboard(db, request, user, csrf, error, status):
         SELECT shift, laser, sum(pieces) AS pieces FROM production WHERE day = ?
     """ + by_employee + " GROUP BY shift, laser", filters).fetchall()
     amounts = {(r["shift"], r["laser"]): r["pieces"] for r in totals}
+    report_rows = db.execute("""
+        SELECT laser, reference, pieces, employee FROM production WHERE day = ? AND shift = ?
+    """ + by_employee + " ORDER BY rowid", (day, shift, *filters[1:])).fetchall()
     assigned = {(r["shift"], r["laser"]): r["employee"] for r in slots}
     staff = {}
     if not operator:
         staff = {r["code"]: r["name"] for r in db.execute(
-            "SELECT code, name FROM employees WHERE role = 'operator' ORDER BY name, code")}
+            "SELECT code, name FROM employees WHERE role = 'operator' AND active = 1 ORDER BY name, code")}
     summary = "".join(
         f'<tr><th scope="row">Turno {turn}</th><td>{sum(key[0] == turn for key in assigned)}'
         f'{" / 11" if not operator else ""}</td><td>{sum(value for key, value in amounts.items() if key[0] == turn):,}</td></tr>'
@@ -194,31 +205,40 @@ def dashboard(db, request, user, csrf, error, status):
         if operator and not code:
             continue
         fields = hidden("shift", shift) + hidden("laser", laser) + hidden("day", day)
-        editor = ""
+        entry_form = ""
+        entry_row = ""
         if operator or (code and user["role"] == "developer"):
-            production_fields = fields + hidden("employee", code) + hidden("id", token_hex(16)) + """
-                <label>Orden / línea<input name="reference" maxlength="80" required></label>
-                <label>Piezas<input name="pieces" type="number" min="1" max="100000" required></label>
-                <button>Registrar piezas</button>"""
-            editor = form("production", csrf, production_fields)
+            form_id = f"capture-{laser}"
+            entry_form = f'<form id="{form_id}" method="post" action="/production">' + (
+                fields + hidden("employee", code) + hidden("id", token_hex(16)) + hidden("csrf", csrf)
+            ) + '</form>'
+            entry_row = f"""<tr><td>+</td><td><input form="{form_id}" name="reference"
+                aria-label="Orden o línea, láser {laser}" maxlength="80" required></td>
+                <td>{escape(code)}</td><td><input form="{form_id}" name="pieces" type="number"
+                aria-label="Piezas, láser {laser}" min="1" max="100000" required></td>
+                <td><button form="{form_id}">Registrar</button></td></tr>"""
+        rows = "".join(
+            f'<tr><td>{index}</td><td>{escape(row["reference"])}</td><td>{escape(row["employee"])}</td>'
+            f'<td>{row["pieces"]:,}</td><td></td></tr>'
+            for index, row in enumerate((row for row in report_rows if row["laser"] == laser), 1)
+        )
+        if not rows and not entry_row:
+            rows = '<tr><td colspan="5">Sin registros para este turno.</td></tr>'
+        editor = ""
         if not operator:
             options = "".join(
                 f'<option value="{escape(key)}" {"selected" if key == code else ""}>{escape(name)} · {escape(key)}</option>'
                 for key, name in staff.items())
             fields += f'<label>Operador<select name="employee"><option value="">Sin asignar</option>{options}</select></label><button>Guardar asignación</button>'
-            editor = form("assign", csrf, fields) + editor
-        cards.append(f"""<article><div class="machine"><h3>Láser {laser:02}</h3>
-            <span>{amounts.get((shift, laser), 0):,} piezas</span></div>{editor}</article>""")
+            editor = form("assign", csrf, fields)
+        cards.append(f"""<article><details {"open" if operator or request.query_params.get("laser") == str(laser) else ""}>
+            <summary><strong>Láser {laser:02}</strong> <span>{amounts.get((shift, laser), 0):,} piezas</span></summary>
+            {editor}{entry_form}<div class="sheet"><table aria-label="Reporte del láser {laser}">
+            <thead><tr><th>#</th><th>Orden / línea</th><th>Operador</th><th>Piezas</th><th>Acción</th></tr></thead>
+            <tbody>{rows}{entry_row}</tbody></table></div></details></article>""")
     grid = "".join(cards) or '<p>Sin máquina asignada para este turno.</p>'
     tabs = "".join(f'<a href="/?turno={turn}" {"aria-current=page" if turn == shift else ""}>Turno {turn}</a>' for turn in (1, 2))
-    account = ""
-    if user["role"] == "developer":
-        account = '<section><h2>Crear cuenta</h2>' + form("employees", csrf, """
-            <label>Código de empleado<input name="code" maxlength="24" required></label>
-            <label>Nombre<input name="name" maxlength="80" required></label>
-            <label>Rol<select name="role"><option value="operator">Operador</option>
-                <option value="supervisor">Supervisor</option></select></label>
-            <button>Crear cuenta</button>""") + '</section>'
+    account = "" if operator else accounts_panel(db, user, csrf)
     contents = f"""<div class="toolbar"><div><h1>Producción de corte</h1>
         <p>{escape(user['name'])} · {ROLES[user['role']]} · {day}</p></div>
         {form('logout', csrf, '<button class="quiet">Cerrar sesión</button>')}</div>
@@ -227,6 +247,51 @@ def dashboard(db, request, user, csrf, error, status):
         <nav aria-label="Turno">{tabs}</nav><h2>{'Mi máquina' if operator else 'Láseres'}</h2>
         <div class="grid">{grid}</div>{account}"""
     return page("Producción de corte", contents, error, status, wide=True)
+
+
+def accounts_panel(db, user, csrf):
+    roles = ("operator", "supervisor") if user["role"] == "developer" else ("operator",)
+    options = "".join(f'<option value="{role}">{ROLES[role]}</option>' for role in roles)
+    creation = form("employees", csrf, f"""
+        <label>Código de empleado<input name="code" maxlength="24" required></label>
+        <label>Nombre<input name="name" maxlength="80" required></label>
+        <label>Rol<select name="role">{options}</select></label><button>Crear cuenta</button>""")
+    rows = []
+    for entry in db.execute("SELECT code, name, role FROM employees WHERE active = 1 ORDER BY name, code"):
+        if entry["role"] not in roles:
+            continue
+        code = hidden("code", entry["code"])
+        reset = form("reset-account", csrf, code + '<button class="quiet">Restablecer a 12345</button>')
+        remove = form("remove-account", csrf, code + '<button class="danger">Confirmar baja</button>')
+        rows.append(f"""<tr><td>{escape(entry["code"])}</td><td>{escape(entry["name"])}</td>
+            <td>{ROLES[entry["role"]]}</td><td>{reset}<details><summary>Dar de baja</summary>
+            <p>Revoca el acceso y libera sus asignaciones activas.</p>{remove}</details></td></tr>""")
+    listing = "".join(rows) or '<tr><td colspan="4">Sin cuentas para gestionar.</td></tr>'
+    return f"""<section id="cuentas"><h2>Cuentas</h2>{creation}<div class="sheet"><table>
+        <thead><tr><th>Código</th><th>Nombre</th><th>Rol</th><th>Acciones</th></tr></thead>
+        <tbody>{listing}</tbody></table></div></section>"""
+
+
+def manage_account(db, user, action, data):
+    roles = ("operator", "supervisor") if user["role"] == "developer" else ("operator",)
+    if action == "employees":
+        role = data.get("role")
+        if role not in roles:
+            raise HTTPException(403)
+        create_employee(db, data.get("code", "").strip(), data.get("name", "").strip(), role)
+        return
+    code = data.get("code", "").strip().upper()
+    target = db.execute("SELECT role FROM employees WHERE code = ? AND active = 1", (code,)).fetchone()
+    if not target or target["role"] not in roles:
+        raise HTTPException(403)
+    db.execute("DELETE FROM sessions WHERE employee = ?", (code,))
+    if action == "reset-account":
+        db.execute("UPDATE employees SET password = ?, pending = 1 WHERE code = ?",
+                   (password_hash(INITIAL_PASSWORD), code))
+        db.execute("DELETE FROM attempts WHERE key = ?", (f"code:{code}",))
+    else:
+        db.execute("UPDATE employees SET active = 0 WHERE code = ?", (code,))
+        db.execute("DELETE FROM assignments WHERE employee = ? AND day >= ?", (code, today()))
 
 
 @app.get("/")
@@ -265,7 +330,7 @@ def login(db, request, data):
         row = db.execute("SELECT count FROM attempts WHERE key = ?", (key,)).fetchone()
         if row and row["count"] >= limit:
             return None, "Demasiados intentos. Intenta de nuevo en unos minutos.", 429
-    user = db.execute("SELECT * FROM employees WHERE code = ?", (code,)).fetchone()
+    user = db.execute("SELECT * FROM employees WHERE code = ? AND active = 1", (code,)).fetchone()
     stored = user["password"] if user else "0" * 32 + ":" + "0" * 64
     password = data.get("password", "")
     matches = compare_digest(stored, password_hash(password[:128], stored.split(":")[0]))
@@ -301,7 +366,7 @@ def assign(db, data):
     if not code:
         db.execute("DELETE FROM assignments WHERE day = ? AND shift = ? AND laser = ?", location)
         return
-    operator = db.execute("SELECT 1 FROM employees WHERE code = ? AND role = 'operator'", (code,)).fetchone()
+    operator = db.execute("SELECT 1 FROM employees WHERE code = ? AND role = 'operator' AND active = 1", (code,)).fetchone()
     if not operator:
         raise ValueError("Selecciona un operador registrado.")
     db.execute("""
@@ -337,7 +402,12 @@ async def mutate(action: str, request: Request):
 
 def handle_mutation(action, request, data):
     shift = data.get("shift", "1")
-    response = RedirectResponse("/?turno=2" if shift == "2" else "/", status_code=303)
+    location = "/?turno=2" if shift == "2" else "/"
+    if action in ("assign", "production") and re.fullmatch(r"(?:[1-9]|1[01])", data.get("laser", "")):
+        location = f'/?turno={shift if shift == "2" else "1"}&laser={data["laser"]}'
+    if action in ("employees", "reset-account", "remove-account"):
+        location += "#cuentas"
+    response = RedirectResponse(location, status_code=303)
     if action == "login":
         with database() as db:
             token, error, status = login(db, request, data)
@@ -370,11 +440,8 @@ def handle_mutation(action, request, data):
                 cookie(response, "corte_session", token)
             elif user["pending"]:
                 raise HTTPException(403)
-            elif action == "employees" and user["role"] == "developer":
-                role = data.get("role")
-                if role not in ("operator", "supervisor"):
-                    raise HTTPException(403)
-                create_employee(db, data.get("code", "").strip(), data.get("name", "").strip(), role)
+            elif action in ("employees", "reset-account", "remove-account") and user["role"] in ("developer", "supervisor"):
+                manage_account(db, user, action, data)
             elif action == "assign" and user["role"] in ("developer", "supervisor"):
                 assign(db, data)
             elif action == "production" and user["role"] in ("developer", "operator"):
