@@ -96,3 +96,18 @@ progress { width: 100%; accent-color: #33884a; height: 14px; }
 @media (max-width: 420px) {
     .cpa-lookup form { grid-template-columns: 1fr; }
 }
+
+.capture { margin-block: 16px; padding: 14px; border-radius: 9px; background: #f2f8f3; }
+.capture form, .report-filter { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+.capture form { max-width: none; }
+.capture form label, .report-filter label { flex: 1 1 130px; }
+.capture form button, .report-filter button { width: auto; }
+.report-filter { max-width: 400px; margin-block: 14px; }
+.production-sheet th { white-space: nowrap; }
+.production-sheet td { vertical-align: top; }
+.production-sheet td:last-child { min-width: 135px; }
+.production-sheet details[open] { width: 225px; }
+.production-sheet a { display: block; }
+#historial { margin-block: 16px; }
+#reprints li { margin-block: 8px; }
+#reprints li form { display: inline-block; margin-left: 8px; }

@@ -4,7 +4,7 @@ Las estaciones abren una URL interna en el navegador. Para actualizar, publica l
 
 El desarrollador crea cuentas de supervisor y operador, asigna máquinas y puede registrar piezas en nombre de un operador asignado. El supervisor asigna láseres y puede crear, restablecer y dar de baja cuentas de operador. El desarrollador también puede gestionar supervisores. Restablecer devuelve la clave a `12345`, cierra las sesiones existentes y obliga a cambiarla en el próximo acceso. Dar de baja revoca el acceso, conserva el historial y reserva el código para esa identidad. El operador registra piezas en su máquina asignada. Cada láser admite dos operarios por fecha y turno. Al asignar un operario a una máquina o turno nuevo, queda trasladado desde su asignación anterior del día. El operario ve su estación y turno asignados. Si todavía no tiene asignación, aparece en Notificaciones.
 
-El día de producción sigue la fecha de República Dominicana. El registro manual toma la referencia de orden o línea y cantidad. El resumen muestra el total capturado por turno y las máquinas asignadas. Una orden o línea repetida se detecta por la referencia completa, sin distinguir mayúsculas ASCII, incluso entre fechas. Queda pendiente y excluida de los totales hasta que un supervisor la conserve o la descarte en Notificaciones. El primer registro permanece confirmado. La validación de órdenes y cantidades con CPA queda para la integración posterior.
+El día de producción sigue la fecha de República Dominicana. El registro manual captura orden, línea, cantidad, SKU y comentarios. El resumen muestra el total capturado por turno y las máquinas asignadas. Las repeticiones se detectan por la clave de orden y línea, incluso entre fechas. Queda pendiente y excluida de los totales hasta que un supervisor la conserve o la descarte en Notificaciones. El primer registro permanece confirmado. La validación de órdenes y cantidades con CPA queda para la integración posterior.
 
 ## Prueba local
 
@@ -26,17 +26,35 @@ Ejecuta Uvicorn detrás de HTTPS en la red interna, sin `CORTE_DEV_HTTP`. La bas
 
 La aplicación arranca con `web.app:app`. Al actualizar desde una versión previa, el servidor migra automáticamente las plazas de los láseres y el estado de revisión. Los registros previos se conservan confirmados.
 
-## Consulta CPA de solo lectura
+## Alcance del piloto
 
-Configura `CPA_DB` con la ruta absoluta al SQLite que actualiza URA y reinicia el servidor. En Windows, por ejemplo, en PowerShell:
+CORTE SK2 reemplaza el registro de producción diario por láser y turno. Cada operario puede consultar todas las filas de la estación asignada y corregir o retirar sus propios registros durante el día de trabajo. El supervisor consulta todos los turnos, asigna personal y revisa duplicados. Las correcciones de terceros quedan reservadas al desarrollador. El historial de cambios registra responsable, fecha y valores anteriores y nuevos.
 
-```powershell
-$env:CPA_DB = '\\cs-600\Control_Produccion_Data\cpa_database.db'
-$env:CPA_FACTORY = 'JuiceSakira2'
+Se conservan los registros del SQLite existente. La migración separa las referencias antiguas cuando reconoce una orden numérica seguida de un Set alfabético. Las referencias ambiguas conservan el texto original y quedan sin línea hasta que se corrijan. El piloto comienza sin importar la pestaña Historia. El Sheet sigue disponible para consultar el histórico.
+
+### Reglas de producción
+
+- **Orden + Línea** concatena el número sin prefijo SO- y la línea en mayúsculas.
+- **Repeticiones** cuenta la clave en el mismo láser y turno. **Dup.** la cuenta en toda la producción de la app. Las dos columnas abarcan los días guardados en la app y excluyen descartes y eliminaciones.
+- Un registro repetido queda pendiente. El supervisor lo confirma o descarta desde Notificaciones. Los totales incluyen solo los confirmados.
+- **Reprint** muestra un asterisco cuando la clave está en Personal → Reprints válidos. El supervisor mantiene ese listado y la autorización no sustituye la revisión de duplicados. Carga allí las autorizaciones del Sheet que sigan vigentes durante el piloto.
+- El SKU y los comentarios se capturan manualmente. La columna **CPA (Supervisor)** queda en espera de integración.
+
+### Actualización y prueba en paralelo
+
+1. En el servidor, conserva la ruta actual de `CORTE_DB`. Con el código actualizado y antes de iniciar Uvicorn, crea un respaldo SQLite consistente. Usa un archivo nuevo en una carpeta protegida que ya exista:
+
+   ```bash
+   python -m web.backup /ruta/privada/corte-sk2-antes-del-cambio.sqlite3
+   ```
+
+2. Arranca la aplicación en la red interna detrás del proxy HTTPS con almacenamiento persistente y sin `CORTE_DEV_HTTP`. Confirma con el equipo de planta el host y diez minutos de prueba desde una estación de cada turno.
+3. Durante las jornadas de piloto acordadas con planta, conserva el Sheet en operación. Compara diariamente fecha, turno, láser, orden, línea, piezas confirmadas, reprints y decisiones de duplicados. Verifica el flujo con dos operarios y una corrección de registro antes de autorizar el cambio definitivo.
+4. Si se necesita revertir, detén el servidor, conserva una copia de la base posterior al cambio y arranca la versión anterior apuntando a una copia del respaldo anterior.
+
+### Pruebas automatizadas
+
+```bash
+python -m pip install httpx
+python -m unittest discover -s tests -v
 ```
-
-En Linux usa la ruta local donde ya está montado el recurso de red. En Codespaces puedes usar una copia de prueba accesible desde el entorno. La cuenta que ejecuta CORTE SK2 necesita permiso de lectura. El archivo CPA es independiente de `CORTE_DB`.
-
-Desde el reporte de un láser abre **Consultar orden en CPA**. La búsqueda exige un número exacto, con o sin prefijo SO-, limita los resultados a la fábrica configurada y muestra el Set, la cantidad CPA y el estado de línea. El valor por defecto de fábrica es `JuiceSakira2`.
-
-Si el esquema usa nombres diferentes o ambiguos, configura los nombres exactos mediante `CPA_COLUMN_ORDER`, `CPA_COLUMN_SET`, `CPA_COLUMN_QTY`, `CPA_COLUMN_STATUS` y `CPA_COLUMN_FACTORY`. Si hay más de una columna de cantidad candidata, verifica cuál representa las piezas de la línea antes de elegir. El registro de producción sigue siendo manual.
