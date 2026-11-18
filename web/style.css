@@ -1,0 +1,55 @@
+:root {
+    color-scheme: dark;
+    font: 16px/1.5 system-ui, sans-serif;
+    color: #edf4ef;
+    background: #0a0e0b;
+    --surface: #131a15;
+    --border: #304038;
+    --muted: #acbdb3;
+    --green: #7fe64f;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 1280px; margin: auto; padding: 28px clamp(16px, 4vw, 48px) 48px; }
+header { border-bottom: 1px solid var(--border); padding-bottom: 18px; margin-bottom: 24px; }
+.brand { color: inherit; text-decoration: none; font-weight: 800; letter-spacing: .12em; }
+.brand strong, .mark { color: var(--green); }
+.mark { margin-right: 6px; }
+h1 { margin: 0; font-size: clamp(1.8rem, 4vw, 2.6rem); }
+h2 { margin: 0 0 12px; font-size: 1.25rem; }
+h3, p { margin: 0; }
+p { color: var(--muted); }
+.login { max-width: 460px; padding-top: clamp(30px, 14vh, 140px); }
+.login form { margin-top: 20px; }
+form { display: grid; gap: 10px; }
+label { display: grid; gap: 4px; font-size: .9rem; }
+input, select, button {
+    min-height: 43px;
+    border: 1px solid var(--border);
+    background: #0d140f;
+    color: inherit;
+    border-radius: 7px;
+    padding: 8px 10px;
+    font: inherit;
+    width: 100%;
+}
+button { background: var(--green); color: #101a0e; font-weight: 700; cursor: pointer; }
+button:hover { background: #a4f181; }
+button.quiet { background: transparent; color: inherit; }
+:focus-visible { outline: 2px solid var(--green); outline-offset: 3px; }
+.toolbar, .machine { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.toolbar { flex-wrap: wrap; }
+section, article { padding: 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+section { margin: 20px 0; }
+section form { max-width: 420px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 8px; text-align: left; border-top: 1px solid var(--border); }
+nav { display: flex; gap: 8px; margin: 24px 0 16px; }
+nav a { color: var(--muted); text-decoration: none; padding: 8px 18px; border: 1px solid var(--border); border-radius: 7px; }
+nav a[aria-current] { color: var(--green); background: #172616; border-color: #588644; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(255px, 100%), 1fr)); gap: 12px; }
+.machine { margin-bottom: 12px; }
+.machine span { font-size: .85rem; color: var(--green); }
+article form + form { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 14px; }
+.alert { color: #ffc5b9; background: #381d18; border: 1px solid #744139; padding: 10px; border-radius: 8px; margin-bottom: 12px; }
