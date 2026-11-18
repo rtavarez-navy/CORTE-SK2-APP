@@ -67,3 +67,24 @@ article form, .recovery { margin-top: 12px; }
 .sheet td:nth-child(2) { overflow-wrap: anywhere; }
 .sheet form { margin: 0; }
 .danger { color: #841a16; background: #fff1ef; }
+
+.eyebrow { color: var(--green); font-size: .72rem; font-weight: 750; letter-spacing: .13em; }
+.dashboard { background: #f5f8f5; min-height: 100vh; }
+.dashboard nav { flex-wrap: wrap; margin-block: 18px 22px; }
+.dashboard nav a { background: #fff; }
+.dashboard nav a[aria-current] { background: #e4f3e7; }
+.metrics, .laser-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 12px; }
+.metrics article strong { display: block; font-size: 2.15rem; line-height: 1.25; color: #184f2b; }
+.bar-row { display: grid; grid-template-columns: 75px 1fr minmax(85px, auto); gap: 10px; align-items: center; margin-block: 12px; }
+progress { width: 100%; accent-color: #33884a; height: 14px; }
+.laser-card { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; padding: 15px; border: 1px solid var(--border); border-radius: 10px; text-decoration: none; color: inherit; background: #fff; }
+.laser-card:hover { border-color: var(--green); background: #f3fbf4; }
+.laser-card p, .laser-card b { grid-column: 1 / -1; }
+.laser-card b { color: var(--green); font-size: .9rem; }
+.pill { display: inline-block; border-radius: 20px; background: #eaf4ec; color: #225538; padding: 2px 8px; font-size: .8rem; white-space: nowrap; }
+.pill.pending { color: #73460a; background: #fff2d5; }
+.pill.rejected { color: #8d2a21; background: #ffecea; }
+.assignment form { max-width: none; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); align-items: end; }
+.review-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.review-actions button { width: auto; }
+.sheet small { display: block; color: var(--muted); }

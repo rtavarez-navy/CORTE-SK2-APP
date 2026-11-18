@@ -11,7 +11,7 @@ import re
 from secrets import token_hex, token_urlsafe
 import sqlite3
 from time import time
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, parse_qsl, urlsplit
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request
@@ -21,6 +21,15 @@ from starlette.concurrency import run_in_threadpool
 INITIAL_PASSWORD = "12345"
 ROLES = {"developer": "Desarrollador", "supervisor": "Supervisor", "operator": "Operador"}
 ZONE = ZoneInfo("America/Santo_Domingo")
+ASSIGNMENTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS assignments (
+    day TEXT NOT NULL, shift INTEGER NOT NULL CHECK (shift IN (1, 2)),
+    laser INTEGER NOT NULL CHECK (laser BETWEEN 1 AND 11),
+    position INTEGER NOT NULL CHECK (position IN (1, 2)),
+    employee TEXT NOT NULL REFERENCES employees(code),
+    PRIMARY KEY (day, shift, laser, position), UNIQUE (day, shift, employee)
+);
+"""
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS employees (
     code TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL,
@@ -30,12 +39,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     token TEXT PRIMARY KEY, employee TEXT NOT NULL REFERENCES employees(code),
     expires INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS assignments (
-    day TEXT NOT NULL, shift INTEGER NOT NULL CHECK (shift IN (1, 2)),
-    laser INTEGER NOT NULL CHECK (laser BETWEEN 1 AND 11),
-    employee TEXT NOT NULL REFERENCES employees(code),
-    PRIMARY KEY (day, shift, laser), UNIQUE (day, shift, employee)
-);
+""" + ASSIGNMENTS_SCHEMA + """
 CREATE TABLE IF NOT EXISTS attempts (
     key TEXT PRIMARY KEY, count INTEGER NOT NULL, expires INTEGER NOT NULL
 );
@@ -89,6 +93,24 @@ def setup():
         columns = {row["name"] for row in db.execute("PRAGMA table_info(employees)")}
         if "active" not in columns:
             db.execute("ALTER TABLE employees ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+
+        assignment_columns = {row["name"] for row in db.execute("PRAGMA table_info(assignments)")}
+        if "position" not in assignment_columns:
+            db.execute("ALTER TABLE assignments RENAME TO assignments_previous")
+            db.execute(ASSIGNMENTS_SCHEMA)
+            db.execute("""
+                INSERT INTO assignments (day, shift, laser, position, employee)
+                SELECT day, shift, laser, 1, employee FROM assignments_previous
+            """)
+            db.execute("DROP TABLE assignments_previous")
+        production_columns = {row["name"] for row in db.execute("PRAGMA table_info(production)")}
+        if "review" not in production_columns:
+            db.execute("""
+                ALTER TABLE production ADD COLUMN review TEXT NOT NULL DEFAULT 'approved'
+                CHECK (review IN ('approved', 'pending', 'rejected'))
+            """)
+            db.execute("ALTER TABLE production ADD COLUMN reviewed_by TEXT REFERENCES employees(code)")
+        db.execute("CREATE INDEX IF NOT EXISTS production_reference ON production(reference COLLATE NOCASE)")
 
 
 @asynccontextmanager
@@ -148,7 +170,7 @@ def stylesheet():
     return FileResponse(Path(__file__).with_name("style.css"), media_type="text/css")
 
 
-def render(request, error="", status=200):
+def render(request, error="", status=200, query=None):
     csrf = request.cookies.get("corte_csrf") or token_urlsafe(32)
     with database() as db:
         user = employee(db, request)
@@ -169,84 +191,174 @@ def render(request, error="", status=200):
                 <button>Guardar y continuar</button>""") + form("logout", csrf, '<button class="quiet">Cerrar sesión</button>')
             response = page("Primer acceso", contents, error, status)
         else:
-            response = dashboard(db, request, user, csrf, error, status)
+            response = dashboard(db, request, user, csrf, error, status, query)
     if not request.cookies.get("corte_csrf"):
         cookie(response, "corte_csrf", csrf)
     return response
 
 
-def dashboard(db, request, user, csrf, error, status):
+def dashboard(db, request, user, csrf, error, status, query=None):
     day = today()
-    shift = 2 if request.query_params.get("turno") == "2" else 1
     operator = user["role"] == "operator"
-    filters = (day, user["code"]) if operator else (day,)
-    by_employee = " AND employee = ?" if operator else ""
-    slots = db.execute("SELECT * FROM assignments WHERE day = ?" + by_employee, filters).fetchall()
-    totals = db.execute("""
-        SELECT shift, laser, sum(pieces) AS pieces FROM production WHERE day = ?
-    """ + by_employee + " GROUP BY shift, laser", filters).fetchall()
-    amounts = {(r["shift"], r["laser"]): r["pieces"] for r in totals}
-    report_rows = db.execute("""
-        SELECT laser, reference, pieces, employee FROM production WHERE day = ? AND shift = ?
-    """ + by_employee + " ORDER BY rowid", (day, shift, *filters[1:])).fetchall()
-    assigned = {(r["shift"], r["laser"]): r["employee"] for r in slots}
-    staff = {}
-    if not operator:
-        staff = {r["code"]: r["name"] for r in db.execute(
-            "SELECT code, name FROM employees WHERE role = 'operator' AND active = 1 ORDER BY name, code")}
-    summary = "".join(
-        f'<tr><th scope="row">Turno {turn}</th><td>{sum(key[0] == turn for key in assigned)}'
-        f'{" / 11" if not operator else ""}</td><td>{sum(value for key, value in amounts.items() if key[0] == turn):,}</td></tr>'
-        for turn in (1, 2)
-    )
+    query = request.query_params if query is None else query
+    shift = 2 if query.get("turno") == "2" else 1
+    view = query.get("vista", "turno" if query.get("turno") else "panel")
+    staff = {row["code"]: row["name"] for row in db.execute(
+        "SELECT code, name FROM employees WHERE role = 'operator' AND active = 1 ORDER BY name, code")}
+    slots = db.execute("SELECT * FROM assignments WHERE day = ? ORDER BY position", (day,)).fetchall()
+    assigned_codes = {slot["employee"] for slot in slots}
+    waiting = {code: name for code, name in staff.items() if code not in assigned_codes}
+    pending = db.execute("""
+        SELECT * FROM production WHERE review = 'pending' ORDER BY day, rowid
+    """).fetchall() if not operator else []
+    toolbar = f"""<div class="toolbar"><div><p class="eyebrow">CORTE · SAKIRA 2</p>
+        <h1>{'Mi producción' if operator else 'Control de producción'}</h1>
+        <p>{escape(user['name'])} · {ROLES[user['role']]} · {day}</p></div>
+        {form('logout', csrf, '<button class="quiet">Cerrar sesión</button>')}</div>"""
+    if operator:
+        mine = [row for row in slots if row["employee"] == user["code"]]
+        if not mine:
+            body = '<section><h2>Esperando asignación</h2><p>Tu supervisor te asignará un láser y un turno.</p><p><a href="/">Actualizar asignación</a></p></section>'
+        else:
+            current = mine[0]
+            rows = db.execute("""
+                SELECT * FROM production WHERE day = ? AND shift = ? AND laser = ? AND employee = ?
+                ORDER BY rowid
+            """, (day, current["shift"], current["laser"], user["code"])).fetchall()
+            body = laser_report(day, current["shift"], current["laser"], [current], rows, staff, user, csrf)
+        return page("Mi producción", toolbar + body, error, status, wide=True)
+
+    links = [
+        ("panel", "/", "Resumen"),
+        ("turno1", "/?vista=turno&turno=1", "Turno 1"),
+        ("turno2", "/?vista=turno&turno=2", "Turno 2"),
+        ("personal", "/?vista=personal", "Personal"),
+        ("avisos", "/?vista=avisos", f"Notificaciones ({len(pending) + len(waiting)})"),
+    ]
+    selected = f"turno{shift}" if view == "turno" else view
+    nav = '<nav aria-label="Secciones">' + "".join(
+        f'<a href="{url.replace("&", "&amp;")}" {"aria-current=page" if key == selected else ""}>{label}</a>'
+        for key, url, label in links
+    ) + '</nav>'
+    if view == "personal":
+        body = accounts_panel(db, user, csrf)
+    elif view == "avisos":
+        body = notifications(db, waiting, pending, staff, csrf)
+    else:
+        production = db.execute("SELECT * FROM production WHERE day = ? ORDER BY rowid", (day,)).fetchall()
+        if view == "turno":
+            laser = query.get("laser", "")
+            if laser in {str(number) for number in range(1, 12)}:
+                number = int(laser)
+                body = (f'<p><a href="/?vista=turno&amp;turno={shift}">← Láseres del turno {shift}</a></p>'
+                        + laser_report(
+                            day, shift, number,
+                            [row for row in slots if row["shift"] == shift and row["laser"] == number],
+                            [row for row in production if row["shift"] == shift and row["laser"] == number],
+                            staff, user, csrf))
+            else:
+                body = shift_grid(shift, slots, production, staff)
+        else:
+            body = overview(slots, production, len(pending), len(waiting))
+    return page("Control de producción", toolbar + nav + body, error, status, wide=True)
+
+
+def overview(slots, production, duplicate_count, waiting_count):
+    units = {shift: sum(row["pieces"] for row in production
+                        if row["shift"] == shift and row["review"] == "approved") for shift in (1, 2)}
+    machines = {(row["shift"], row["laser"]) for row in slots}
+    maximum = max(1, *units.values())
+    bars = "".join(f"""<div class="bar-row"><strong>Turno {shift}</strong>
+        <progress value="{units[shift]}" max="{maximum}" aria-label="Piezas del turno {shift}"></progress>
+        <span>{units[shift]:,} piezas</span></div>""" for shift in (1, 2))
+    return f"""<div class="metrics">
+        <article><p>Piezas confirmadas</p><strong>{sum(units.values()):,}</strong></article>
+        <article><p>Láseres con personal</p><strong>{len(machines)} / 22</strong><p>Entre ambos turnos</p></article>
+        <article><p>Órdenes por revisar</p><strong>{duplicate_count}</strong></article>
+        <article><p>Operarios sin asignar</p><strong>{waiting_count}</strong></article></div>
+        <section><h2>Producción de hoy por turno</h2>{bars}</section>"""
+
+
+def shift_grid(shift, slots, production, staff):
     cards = []
     for laser in range(1, 12):
-        code = assigned.get((shift, laser))
-        if operator and not code:
-            continue
-        fields = hidden("shift", shift) + hidden("laser", laser) + hidden("day", day)
-        entry_form = ""
-        entry_row = ""
-        if operator or (code and user["role"] == "developer"):
-            form_id = f"capture-{laser}"
-            entry_form = f'<form id="{form_id}" method="post" action="/production">' + (
-                fields + hidden("employee", code) + hidden("id", token_hex(16)) + hidden("csrf", csrf)
-            ) + '</form>'
-            entry_row = f"""<tr><td>+</td><td><input form="{form_id}" name="reference"
-                aria-label="Orden o línea, láser {laser}" maxlength="80" required></td>
-                <td>{escape(code)}</td><td><input form="{form_id}" name="pieces" type="number"
-                aria-label="Piezas, láser {laser}" min="1" max="100000" required></td>
-                <td><button form="{form_id}">Registrar</button></td></tr>"""
-        rows = "".join(
-            f'<tr><td>{index}</td><td>{escape(row["reference"])}</td><td>{escape(row["employee"])}</td>'
-            f'<td>{row["pieces"]:,}</td><td></td></tr>'
-            for index, row in enumerate((row for row in report_rows if row["laser"] == laser), 1)
-        )
-        if not rows and not entry_row:
-            rows = '<tr><td colspan="5">Sin registros para este turno.</td></tr>'
-        editor = ""
-        if not operator:
-            options = "".join(
-                f'<option value="{escape(key)}" {"selected" if key == code else ""}>{escape(name)} · {escape(key)}</option>'
-                for key, name in staff.items())
-            fields += f'<label>Operador<select name="employee"><option value="">Sin asignar</option>{options}</select></label><button>Guardar asignación</button>'
-            editor = form("assign", csrf, fields)
-        cards.append(f"""<article><details {"open" if operator or request.query_params.get("laser") == str(laser) else ""}>
-            <summary><strong>Láser {laser:02}</strong> <span>{amounts.get((shift, laser), 0):,} piezas</span></summary>
-            {editor}{entry_form}<div class="sheet"><table aria-label="Reporte del láser {laser}">
-            <thead><tr><th>#</th><th>Orden / línea</th><th>Operador</th><th>Piezas</th><th>Acción</th></tr></thead>
-            <tbody>{rows}{entry_row}</tbody></table></div></details></article>""")
-    grid = "".join(cards) or '<p>Sin máquina asignada para este turno.</p>'
-    tabs = "".join(f'<a href="/?turno={turn}" {"aria-current=page" if turn == shift else ""}>Turno {turn}</a>' for turn in (1, 2))
-    account = "" if operator else accounts_panel(db, user, csrf)
-    contents = f"""<div class="toolbar"><div><h1>Producción de corte</h1>
-        <p>{escape(user['name'])} · {ROLES[user['role']]} · {day}</p></div>
-        {form('logout', csrf, '<button class="quiet">Cerrar sesión</button>')}</div>
-        <section><h2>Resumen del día</h2><table><thead><tr><th>Turno</th>
-        <th>Láseres asignados</th><th>Piezas registradas</th></tr></thead><tbody>{summary}</tbody></table></section>
-        <nav aria-label="Turno">{tabs}</nav><h2>{'Mi máquina' if operator else 'Láseres'}</h2>
-        <div class="grid">{grid}</div>{account}"""
-    return page("Producción de corte", contents, error, status, wide=True)
+        operators = [row["employee"] for row in slots if row["shift"] == shift and row["laser"] == laser]
+        names = ", ".join(escape(staff.get(code, code)) for code in operators) or "Sin personal"
+        pieces = sum(row["pieces"] for row in production
+                     if row["shift"] == shift and row["laser"] == laser and row["review"] == "approved")
+        cards.append(f"""<a class="laser-card" href="/?vista=turno&amp;turno={shift}&amp;laser={laser}">
+            <strong>Láser {laser:02}</strong><span class="pill">{len(operators)} / 2</span>
+            <p>{names}</p><b>{pieces:,} piezas</b></a>""")
+    return f'<h2>Turno {shift} · Láseres</h2><div class="laser-grid">{"".join(cards)}</div>'
+
+
+def laser_report(day, shift, laser, slots, rows, staff, user, csrf):
+    scope = hidden("day", day) + hidden("shift", shift) + hidden("laser", laser)
+    operator = user["role"] == "operator"
+    assignment = ""
+    if not operator:
+        choices = []
+        for position in (1, 2):
+            current = next((row["employee"] for row in slots if row["position"] == position), "")
+            options = "".join(f'<option value="{escape(code)}" {"selected" if code == current else ""}>'
+                              f'{escape(name)} · {escape(code)}</option>' for code, name in staff.items())
+            choices.append(f'<label>Operario {position}<select name="employee{position}">'
+                           f'<option value="">Sin asignar</option>{options}</select></label>')
+        assignment = '<div class="assignment">' + form(
+            "assign", csrf, scope + "".join(choices) + '<button>Guardar asignación</button>') + '</div>'
+    statuses = {"approved": "Confirmado", "pending": "Por revisar", "rejected": "Descartado"}
+    table_rows = "".join(
+        f'<tr><td>{i}</td><td>{escape(row["reference"])}</td><td>{escape(row["employee"])}</td>'
+        f'<td>{row["pieces"]:,}</td><td><span class="pill {row["review"]}">{statuses[row["review"]]}</span></td></tr>'
+        for i, row in enumerate(rows, 1)
+    )
+    capture = ""
+    if slots and (operator or user["role"] == "developer"):
+        capture = ('<form id="capture" method="post" action="/production">'
+                   + scope + hidden("id", token_hex(16)) + hidden("csrf", csrf) + '</form>')
+        if operator:
+            employee_cell = escape(user["code"])
+        else:
+            options = "".join(f'<option value="{escape(row["employee"])}">{escape(row["employee"])}</option>'
+                              for row in slots)
+            employee_cell = f'<select form="capture" name="employee" aria-label="Operario">{options}</select>'
+        table_rows += f"""<tr><td>+</td><td><input form="capture" name="reference"
+            aria-label="Orden o línea" maxlength="80" required></td><td>{employee_cell}</td>
+            <td><input form="capture" name="pieces" aria-label="Piezas" type="number"
+            min="1" max="100000" required></td><td><button form="capture">Registrar</button></td></tr>"""
+    if not table_rows:
+        table_rows = '<tr><td colspan="5">Sin registros para este turno.</td></tr>'
+    return f"""<section><h2>Láser {laser:02} · Turno {shift}</h2>{assignment}{capture}
+        <div class="sheet"><table aria-label="Reporte del láser {laser}">
+        <thead><tr><th>#</th><th>Orden / línea</th><th>Operario</th><th>Piezas</th><th>Estado</th></tr></thead>
+        <tbody>{table_rows}</tbody></table></div></section>"""
+
+
+def notifications(db, waiting, pending, staff, csrf):
+    queue = []
+    for row in pending:
+        previous = db.execute("""
+            SELECT day, shift, laser, pieces FROM production
+            WHERE reference = ? COLLATE NOCASE AND review = 'approved'
+            ORDER BY rowid DESC LIMIT 1
+        """, (row["reference"],)).fetchone()
+        context = (f'<small>Confirmado: {previous["day"]} · T{previous["shift"]} · '
+                   f'Láser {previous["laser"]} · {previous["pieces"]:,} piezas</small>'
+                   if previous else '<small>Sin otro registro confirmado</small>')
+        fields = hidden("record", row["id"])
+        controls = form("review", csrf, fields + """
+            <div class="review-actions"><button name="decision" value="approved">Conservar</button>
+            <button class="danger" name="decision" value="rejected">Descartar</button></div>""")
+        queue.append(f"""<tr><td>{escape(row['reference'])}{context}</td><td>{row['day']} · T{row['shift']} · Láser {row['laser']}</td>
+            <td>{escape(staff.get(row['employee'], row['employee']))}</td><td>{row['pieces']:,}</td><td>{controls}</td></tr>""")
+    waits = "".join(f'<li>{escape(name)} · {escape(code)}</li>' for code, name in waiting.items())
+    duplicates = "".join(queue) or '<tr><td colspan="5">Sin duplicados pendientes.</td></tr>'
+    return f"""<section><h2>Órdenes duplicadas</h2><div class="sheet"><table>
+        <thead><tr><th>Orden / línea</th><th>Registro</th><th>Operario</th><th>Piezas</th><th>Decisión</th></tr></thead>
+        <tbody>{duplicates}</tbody></table></div></section>
+        <section><h2>Operarios esperando asignación</h2>
+        {f'<ul>{waits}</ul>' if waits else '<p>Todos los operarios activos tienen asignación.</p>'}
+        <p><a href="/?vista=turno&amp;turno=1">Ir al Turno 1</a> · <a href="/?vista=turno&amp;turno=2">Ir al Turno 2</a></p></section>"""
 
 
 def accounts_panel(db, user, csrf):
@@ -362,17 +474,19 @@ def slot(data):
 
 def assign(db, data):
     location = slot(data)
-    code = data.get("employee", "")
-    if not code:
-        db.execute("DELETE FROM assignments WHERE day = ? AND shift = ? AND laser = ?", location)
-        return
-    operator = db.execute("SELECT 1 FROM employees WHERE code = ? AND role = 'operator' AND active = 1", (code,)).fetchone()
-    if not operator:
-        raise ValueError("Selecciona un operador registrado.")
-    db.execute("""
-        INSERT INTO assignments VALUES (?, ?, ?, ?)
-        ON CONFLICT(day, shift, laser) DO UPDATE SET employee = excluded.employee
-    """, (*location, code))
+    codes = [data.get("employee1", ""), data.get("employee2", "")]
+    if codes[0] and codes[0] == codes[1]:
+        raise ValueError("Selecciona dos operarios distintos.")
+    db.execute("DELETE FROM assignments WHERE day = ? AND shift = ? AND laser = ?", location)
+    for position, code in enumerate(codes, 1):
+        if not code:
+            continue
+        if not db.execute("SELECT 1 FROM employees WHERE code = ? AND role = 'operator' AND active = 1", (code,)).fetchone():
+            raise ValueError("Selecciona un operario registrado.")
+        db.execute("DELETE FROM assignments WHERE day = ? AND employee = ?", (location[0], code))
+        db.execute("""
+            INSERT INTO assignments (day, shift, laser, position, employee) VALUES (?, ?, ?, ?, ?)
+        """, (*location, position, code))
 
 
 def record(db, user, data):
@@ -385,13 +499,17 @@ def record(db, user, data):
         raise ValueError("Indica una orden o línea y una cantidad válida.")
     code = user["code"] if user["role"] == "operator" else data.get("employee", "")
     db.execute("""
-        INSERT INTO production (id, day, shift, laser, employee, reference, pieces, recorded_by)
-        SELECT ?, day, shift, laser, employee, ?, ?, ? FROM assignments
+        INSERT INTO production (id, day, shift, laser, employee, reference, pieces, recorded_by, review)
+        SELECT ?, day, shift, laser, employee, ?, ?, ?,
+            CASE WHEN EXISTS (
+                SELECT 1 FROM production WHERE reference = ? COLLATE NOCASE AND review != 'rejected'
+            ) THEN 'pending' ELSE 'approved' END
+        FROM assignments
         WHERE day = ? AND shift = ? AND laser = ? AND employee = ?
         ON CONFLICT(id) DO NOTHING
-    """, (request_id, reference, int(pieces), user["code"], *location, code))
+    """, (request_id, reference, int(pieces), user["code"], reference, *location, code))
     entry = db.execute("SELECT * FROM production WHERE id = ?", (request_id,)).fetchone()
-    if not entry or tuple(entry)[1:] != (*location, code, reference, int(pieces), user["code"]):
+    if not entry or tuple(entry)[1:8] != (*location, code, reference, int(pieces), user["code"]):
         raise ValueError("La asignación o el registro cambió. Actualiza la pantalla.")
 
 
@@ -404,9 +522,11 @@ def handle_mutation(action, request, data):
     shift = data.get("shift", "1")
     location = "/?turno=2" if shift == "2" else "/"
     if action in ("assign", "production") and re.fullmatch(r"(?:[1-9]|1[01])", data.get("laser", "")):
-        location = f'/?turno={shift if shift == "2" else "1"}&laser={data["laser"]}'
+        location = f'/?vista=turno&turno={shift if shift == "2" else "1"}&laser={data["laser"]}'
     if action in ("employees", "reset-account", "remove-account"):
-        location += "#cuentas"
+        location = "/?vista=personal#cuentas"
+    if action == "review":
+        location = "/?vista=avisos"
     response = RedirectResponse(location, status_code=303)
     if action == "login":
         with database() as db:
@@ -444,6 +564,14 @@ def handle_mutation(action, request, data):
                 manage_account(db, user, action, data)
             elif action == "assign" and user["role"] in ("developer", "supervisor"):
                 assign(db, data)
+            elif action == "review" and user["role"] in ("developer", "supervisor"):
+                decision = data.get("decision")
+                if decision not in ("approved", "rejected"):
+                    raise HTTPException(400)
+                db.execute("""
+                    UPDATE production SET review = ?, reviewed_by = ?
+                    WHERE id = ? AND review = 'pending'
+                """, (decision, user["code"], data.get("record", "")))
             elif action == "production" and user["role"] in ("developer", "operator"):
                 record(db, user, data)
             else:
@@ -451,9 +579,9 @@ def handle_mutation(action, request, data):
     except sqlite3.IntegrityError:
         error = ("Ese operador ya tiene otro láser en el mismo turno." if action == "assign"
                  else "Ese código de empleado ya existe.")
-        return render(request, error, 409)
+        return render(request, error, 409, dict(parse_qsl(urlsplit(location).query)))
     except ValueError as exc:
-        return render(request, str(exc), 400)
+        return render(request, str(exc), 400, dict(parse_qsl(urlsplit(location).query)))
     return response
 
 
