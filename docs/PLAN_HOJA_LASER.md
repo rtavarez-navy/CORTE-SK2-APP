@@ -83,7 +83,9 @@ La columna L (Operario) se llena sola. El operario no la ve ni la escribe. El su
 
 Cada hoja de láser es la semana en curso. No hay que empezar de cero cada día.
 
-- **Semana:** de lunes a domingo, en zona horaria de República Dominicana. La hoja del láser muestra solo la semana actual y su turno seleccionado. Supuesto a confirmar: lunes a domingo.
+- **Semana:** empieza el lunes y termina el domingo, en zona horaria de República Dominicana.
+- **Selector de semana (supervisor):** un selector de semana en la parte superior de la hoja del láser. Por defecto muestra la semana actual. El supervisor puede elegir cualquier semana anterior guardada en Historia, y la hoja de esa semana se muestra igual que la actual, en modo solo lectura.
+- **Operario:** ve solo la semana actual de su láser y turno. No tiene selector de semana.
 - **Cierre:** al terminar el domingo a las 23:59, una tarea programada archiva todas las filas de la semana en la hoja **Historia** y vacía la hoja del láser para la semana siguiente.
 - **Historia:** una sola hoja con todos los registros de todas las semanas, con las mismas columnas más Láser, Turno, Semana y Operario. Es de solo lectura. Solo el desarrollador puede corregirla, y cada corrección queda en el historial de cambios.
 - **Datos en la semana:** el número de la semana (por ejemplo, `2026-S47`) se guarda en cada registro. Así Historia y la hoja semanal salen de la misma tabla y no hay que copiar datos a mano.
@@ -204,9 +206,8 @@ Decidido:
 
 - Columna **Operario** automática y oculta para el operario. **Estado** visible para todos.
 - Cada hoja de láser es la semana en curso. Al cerrar la semana, las filas pasan a la hoja **Historia**.
+- La semana va de lunes a domingo. El supervisor elige la semana a ver con un selector; el operario ve solo la actual.
 
 Pendiente:
-
-- [ ] ¿La semana va de lunes a domingo? Supuesto del plan, a confirmar.
 - [ ] ¿Pegar desde Google Sheets se permite al operario, o solo al supervisor?
 - [ ] ¿Las pestañas de hoja muestran todos los láseres de la semana para el supervisor, o solo el láser seleccionado?
