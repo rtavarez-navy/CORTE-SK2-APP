@@ -28,17 +28,39 @@ La aplicación arranca con `web.app:app`. Al actualizar desde una versión previ
 
 ## Alcance del piloto
 
-CORTE SK2 reemplaza el registro de producción diario por láser y turno. Cada operario puede consultar todas las filas de la estación asignada y corregir o retirar sus propios registros durante el día de trabajo. El supervisor consulta todos los turnos, asigna personal y revisa duplicados. Las correcciones de terceros quedan reservadas al desarrollador. El historial de cambios registra responsable, fecha y valores anteriores y nuevos.
+CORTE SK2 reemplaza el registro de producción diario por láser y turno. Cada operario puede consultar todas las filas de la estación asignada y corregir o retirar sus propios registros durante el día de trabajo. El supervisor consulta todos los turnos, corrige filas de la semana abierta, asigna personal y revisa duplicados. Solo el desarrollador puede corregir filas archivadas desde Historia. El historial de cambios registra responsable, fecha y valores anteriores y nuevos.
 
-Se conservan los registros del SQLite existente. La migración separa las referencias antiguas cuando reconoce una orden numérica seguida de un Set alfabético. Las referencias ambiguas conservan el texto original y quedan sin línea hasta que se corrijan. El piloto comienza sin importar la pestaña Historia. El Sheet sigue disponible para consultar el histórico.
+Se conservan los registros del SQLite existente. La migración separa las referencias antiguas cuando reconoce una orden numérica seguida de un Set alfabético. Las referencias ambiguas conservan el texto original y quedan sin línea hasta que se corrijan. La pestaña Historia del Sheet se puede cargar mediante el importador de esta versión.
 
 ### Reglas de producción
 
-- **Orden + Línea** concatena el número sin prefijo SO- y la línea en mayúsculas.
+- **Orden + Línea** une el número sin prefijo SO- y la línea en mayúsculas con un guion.
 - **Repeticiones** cuenta la clave en el mismo láser y turno. **Dup.** la cuenta en toda la producción de la app. Las dos columnas abarcan los días guardados en la app y excluyen descartes y eliminaciones.
 - Un registro repetido queda pendiente. El supervisor lo confirma o descarta desde Notificaciones. Los totales incluyen solo los confirmados.
 - **Reprint** muestra un asterisco cuando la clave está en Personal → Reprints válidos. El supervisor mantiene ese listado y la autorización no sustituye la revisión de duplicados. Carga allí las autorizaciones del Sheet que sigan vigentes durante el piloto.
 - El SKU y los comentarios se capturan manualmente. La consulta directa a CPA se hace en la caja del reporte. La columna **CPA (Supervisor)** del registro se reserva para una validación posterior.
+
+### Hoja semanal por láser
+
+La captura se hace en la última fila. Selecciona una celda y escribe, pulsa F2 o haz doble clic para editar. Enter guarda la fila y baja a la misma columna. Las flechas, Tab, Inicio y Fin recorren las celdas. Escape cancela la edición y Ctrl+Z revierte el último guardado o pegado de la sesión. Con JavaScript desactivado, puedes escribir en los campos de la fila y guardarla con Enter o desde su menú.
+
+El supervisor puede pegar hasta 200 filas por operación desde Google Sheets. Pega el bloque desde la columna A si incluye fecha o desde B si empieza por orden. Si el bloque omite la fecha o el operario, se usan los valores de la fila nueva. La fecha y el operario deben corresponder a una asignación del láser y turno. Las columnas calculadas se regeneran al guardar. Si alguna fila del bloque es inválida, se revierte el bloque completo.
+
+La semana sigue el horario de República Dominicana, de lunes a domingo. Al llegar el lunes, el servidor guarda un respaldo verificado y cambia la semana abierta. Historia usa las mismas filas de SQLite, identificadas por su semana. Configura `CORTE_BACKUP_DIR` para elegir la carpeta de respaldos. Por defecto se usa `respaldos` junto a `CORTE_DB`. Si el respaldo falla, el servidor conserva la semana abierta, avisa en Notificaciones y reintenta. Si el servicio estaba apagado, comprueba el cierre al iniciar.
+
+### Cargar Historia de Google Sheets
+
+En la pestaña **Historia** de Corte Sakira 2, descarga la hoja actual como CSV. El importador lee sus seis primeras columnas `FECHA`, `#ORDEN`, `LINEA`, `CANT`, `COMENT` y `LASER`. Conserva el orden y las filas repetidas del origen. El operario queda vacío en Historia si el CSV carece de ese dato.
+
+Desde el servidor, valida el archivo y luego aplica la carga con una ruta nueva de respaldo. Mantén el CSV y la base de datos fuera del repositorio.
+
+```bash
+python -m web.import_history /ruta/privada/Historia.csv
+CORTE_DB=/ruta/privada/corte-sk2.sqlite3 python -m web.import_history /ruta/privada/Historia.csv \
+  --backup /ruta/privada/corte-sk2-antes-de-historia.sqlite3
+```
+
+La primera orden revisa el CSV sin tocar la base. La segunda importa semanas cerradas dentro de una transacción. Se puede repetir con el mismo CSV y un respaldo nuevo sin duplicar filas. La carga indica el número de fila si encuentra datos inválidos y permite omitirlos explícitamente con `--skip-invalid` una vez revisados.
 
 ### Actualización y prueba en paralelo
 

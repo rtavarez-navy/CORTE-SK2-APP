@@ -5,7 +5,8 @@ import re
 
 
 def reference_key(order, line):
-    return order.upper().removeprefix("SO-") + line.upper()
+    prefix = order.upper().removeprefix("SO-")
+    return f"{prefix}-{line.upper()}" if line else prefix
 
 
 def migrate(db):
@@ -34,6 +35,13 @@ def migrate(db):
             order_line TEXT PRIMARY KEY, order_number TEXT NOT NULL, line TEXT NOT NULL
         )
     """)
+    db.create_function("production_reference", 2, reference_key)
+    db.execute("""UPDATE production SET order_line = production_reference(order_number, line)
+        WHERE order_line != production_reference(order_number, line)""")
+    db.execute("""INSERT OR IGNORE INTO valid_reprints (order_line, order_number, line)
+        SELECT production_reference(order_number, line), order_number, line FROM valid_reprints""")
+    db.execute("""DELETE FROM valid_reprints
+        WHERE order_line != production_reference(order_number, line)""")
     db.execute("CREATE INDEX IF NOT EXISTS production_key ON production(order_line, shift, laser) WHERE deleted_at IS NULL")
     db.execute("CREATE INDEX IF NOT EXISTS production_day ON production(day, shift, laser) WHERE deleted_at IS NULL")
     db.execute("CREATE INDEX IF NOT EXISTS audit_record ON production_audit(record_id, sequence)")
@@ -97,3 +105,9 @@ def report_counts(db, rows, shift, laser):
         """
         counts.update({row["order_line"]: row for row in db.execute(query, (shift, laser, *chunk))})
     return counts
+
+
+def revision(db, key):
+    return db.execute(
+        "SELECT COALESCE(MAX(sequence), 0) FROM production_audit WHERE record_id = ?", (key,)
+    ).fetchone()[0]

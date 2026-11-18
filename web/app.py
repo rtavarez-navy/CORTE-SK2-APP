@@ -1,6 +1,7 @@
 """CORTE SK2, servidor web de planta."""
 import argparse
-from contextlib import asynccontextmanager, contextmanager
+import asyncio
+from contextlib import asynccontextmanager, contextmanager, suppress
 from datetime import date, datetime, timezone
 from hashlib import pbkdf2_hmac, sha256
 from hmac import compare_digest
@@ -16,11 +17,12 @@ from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from web import cpa, production as ledger
+from web import cpa, production as ledger, sheet, weeks
+from web.sheet import form, hidden
 
 WEB_ROOT = Path(__file__).parent
 INITIAL_PASSWORD = "12345"
@@ -116,12 +118,26 @@ def setup():
             """)
             db.execute("ALTER TABLE production ADD COLUMN reviewed_by TEXT REFERENCES employees(code)")
         ledger.migrate(db)
+        weeks.migrate(db, today())
+
+
+async def close_weeks():
+    while True:
+        await asyncio.sleep(30)
+        await run_in_threadpool(weeks.rollover, database, today())
 
 
 @asynccontextmanager
 async def lifespan(_app):
     await run_in_threadpool(setup)
-    yield
+    await run_in_threadpool(weeks.rollover, database, today())
+    closer = asyncio.create_task(close_weeks())
+    try:
+        yield
+    finally:
+        closer.cancel()
+        with suppress(asyncio.CancelledError):
+            await closer
 
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -134,7 +150,7 @@ async def headers(request, call_next):
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Content-Security-Policy"] = (
-        "default-src 'none'; style-src 'self'; img-src 'self'; font-src 'self'; script-src 'self'; form-action 'self'; "
+        "default-src 'none'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; script-src 'self'; form-action 'self'; "
         "frame-ancestors 'none'; base-uri 'none'"
     )
     return response
@@ -152,14 +168,6 @@ def employee(db, request):
     """, (digest(request.cookies.get("corte_session", "")), int(time()))).fetchone()
 
 
-def hidden(name, value):
-    return f'<input type="hidden" name="{name}" value="{escape(str(value))}">'
-
-
-def form(action, csrf, fields):
-    return f'<form method="post" action="/{action}">{hidden("csrf", csrf)}{fields}</form>'
-
-
 def page(title, content, error="", status=200, layout="login", header_actions=""):
     alert = f'<p role="alert" class="alert">{escape(error)}</p>' if error else ""
     return HTMLResponse(f"""<!doctype html>
@@ -169,6 +177,7 @@ def page(title, content, error="", status=200, layout="login", header_actions=""
 <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/static/favicon-180.png">
 {('<script src="/static/report.js" defer></script>' if layout == 'report' else '')}
+{('<script src="/static/sheet.js" defer></script>' if layout in ('station', 'report') else '')}
 </head><body class="{layout}">
 <header class="site-header"><div class="frame header-inner">
     <a href="/" class="brand">
@@ -223,6 +232,17 @@ def dashboard(db, request, user, csrf, error, status, query=None):
     current_day = today()
     operator = user["role"] == "operator"
     query = request.query_params if query is None else query
+    cycle = weeks.current(db)
+    open_week = cycle["open_week"]
+    requested_week = query.get("semana", "")
+    week = open_week
+    if not operator:
+        try:
+            candidate = requested_week or (weeks.week_of(query["fecha"]) if query.get("fecha") else open_week)
+            if weeks.week_of(weeks.monday(candidate).isoformat()) == candidate and candidate <= open_week:
+                week = candidate
+        except ValueError:
+            pass
     day = current_day
     if not operator and query.get("fecha"):
         try:
@@ -253,11 +273,7 @@ def dashboard(db, request, user, csrf, error, status, query=None):
             shift, number = current["shift"], current["laser"]
             station = f"Láser {number} · Turno {shift}"
             header_actions = f'<span class="station-context">{station}</span>{logout}'
-            rows = db.execute("""
-                SELECT * FROM production WHERE day = ? AND shift = ? AND laser = ? AND deleted_at IS NULL
-                ORDER BY rowid
-            """, (day, shift, number)).fetchall()
-            body = laser_report(db, day, shift, number, [current], rows, staff, user, csrf, query)
+            body = laser_report(db, open_week, open_week, shift, number, [current], staff, user, csrf, query)
         return page("Estación", body, error, status, "station", header_actions)
 
     date_suffix = "&fecha=" + day if day != current_day else ""
@@ -265,8 +281,9 @@ def dashboard(db, request, user, csrf, error, status, query=None):
         ("panel", "/?vista=panel" + date_suffix, "Resumen"),
         ("turno1", "/?vista=turno&turno=1" + date_suffix, "Turno 1"),
         ("turno2", "/?vista=turno&turno=2" + date_suffix, "Turno 2"),
+        ("historia", "/?vista=historia", "Historia"),
         ("personal", "/?vista=personal", "Personal"),
-        ("avisos", "/?vista=avisos", f"Notificaciones ({len(pending) + len(waiting)})"),
+        ("avisos", "/?vista=avisos", f"Notificaciones ({len(pending) + len(waiting) + bool(cycle['error'])})"),
     ]
     selected = f"turno{shift}" if view == "turno" else view
     nav = '<nav aria-label="Secciones">' + "".join(
@@ -279,7 +296,12 @@ def dashboard(db, request, user, csrf, error, status, query=None):
         body = accounts_panel(db, user, csrf) + reprints_panel(db, csrf)
     elif view == "avisos":
         title = "Notificaciones"
-        body = notifications(db, waiting, pending, staff, csrf)
+        failure = f'<p class="alert" role="alert">{escape(cycle["error"])}</p>' if cycle["error"] else ""
+        body = failure + notifications(db, waiting, pending, staff, csrf)
+    elif view == "historia":
+        title = "Historia"
+        layout = "report"
+        body = history_report(db, open_week, staff, user, csrf, query)
     else:
         production = db.execute(
             "SELECT * FROM production WHERE day = ? AND deleted_at IS NULL ORDER BY rowid", (day,)
@@ -292,9 +314,8 @@ def dashboard(db, request, user, csrf, error, status, query=None):
                 layout = "report"
                 back = f'<a class="text-action" href="/?vista=turno&amp;turno={shift}{escape(date_suffix)}">← Láseres del turno {shift}</a>'
                 body = laser_report(
-                    db, day, shift, number,
+                    db, week, open_week, shift, number,
                     [row for row in slots if row["shift"] == shift and row["laser"] == number],
-                    [row for row in production if row["shift"] == shift and row["laser"] == number],
                     staff, user, csrf, query, back)
             else:
                 title = f"Láseres del turno {shift}"
@@ -353,95 +374,160 @@ def shift_grid(shift, slots, production, staff, date_suffix, heading=True):
     return f'<section class="shift-section">{title}<div class="laser-grid">{"".join(cards)}</div></section>'
 
 
-def laser_report(db, day, shift, laser, slots, rows, staff, user, csrf, query, back=""):
-    scope = hidden("day", day) + hidden("shift", shift) + hidden("laser", laser)
+def can_edit_row(db, user, row, open_week):
+    if row["week"] < open_week:
+        return user["role"] == "developer"
+    if row["week"] != open_week:
+        return False
+    return user["role"] != "operator" or (
+        row["employee"] == user["code"]
+        and may_capture(db, user, (today(), row["shift"], row["laser"]), user["code"]))
+
+
+def sheet_rows(db, rows, staff, user, open_week, editable):
+    grouped = {}
+    prepared = []
+    managed = list(staff.items())
+    assignment = None
+    if user["role"] == "operator":
+        assignment = db.execute("""SELECT shift, laser FROM assignments WHERE day = ? AND employee = ?
+            ORDER BY position, shift, laser LIMIT 1""", (today(), user["code"])).fetchone()
+        assignment = tuple(assignment) if assignment else ()
+    for row in rows:
+        location = (row["shift"], row["laser"])
+        grouped.setdefault(location, []).append(row)
+        access = editable and (can_edit_row(db, user, row, open_week) if assignment is None else
+                               row["week"] == open_week and row["employee"] == user["code"]
+                               and location == assignment)
+        prepared.append(dict(row, access=access, employee_options=managed,
+                             deletable=user["role"] != "supervisor" or row["recorded_by"] == user["code"]))
+    counts = {}
+    for (shift, laser), subset in grouped.items():
+        values = ledger.report_counts(db, subset, shift, laser)
+        counts.update((row["id"], values.get(row["order_line"])) for row in subset)
+    return prepared, counts
+
+
+def week_options(db, open_week, selected, include_open):
+    options = [row["week"] for row in db.execute(
+        "SELECT DISTINCT week FROM production WHERE week < ? AND deleted_at IS NULL ORDER BY week DESC",
+        (open_week,))]
+    if include_open:
+        options.insert(0, open_week)
+    if selected and selected not in options:
+        options.append(selected)
+    return "".join(f'<option value="{week}" {"selected" if week == selected else ""}>'
+                   f'{weeks.label(week)}</option>' for week in options)
+
+
+def laser_report(db, week, open_week, shift, laser, slots, staff, user, csrf, query, back=""):
+    day = today()
+    active = week == open_week
+    capture_week = active and weeks.week_of(day) == open_week
     operator = user["role"] == "operator"
+    params = {"vista": "turno", "turno": shift, "laser": laser, "semana": week}
+    scope = hidden("shift", shift) + hidden("laser", laser) + hidden("semana", week)
+    report_scope = hidden("vista", "turno") + hidden("laser", laser) + hidden("turno", shift)
+    rows = db.execute("""SELECT * FROM production WHERE week = ? AND shift = ? AND laser = ?
+        AND deleted_at IS NULL ORDER BY rowid""", (week, shift, laser)).fetchall()
+    totals = sum(row["pieces"] for row in rows if row["review"] == "approved")
+    search = query.get("orden", "").strip()[:80]
+    search_key = re.sub(r"[\s/\-]+", "", search.upper().removeprefix("SO-"))
+    selected = [row for row in rows if search_key in row["order_line"].replace("-", "")
+                or search.upper() in row["reference"].upper()]
+    prepared, counts = sheet_rows(db, selected, staff, user, open_week, active)
+    options = []
+    if not operator:
+        slots = db.execute("""SELECT * FROM assignments WHERE day=? AND shift=? AND laser=?
+            ORDER BY position""", (day, shift, laser)).fetchall()
+        options = [(row["employee"], staff.get(row["employee"], row["employee"])) for row in slots]
+    new_row = (day, options) if capture_week and (slots if operator else options) else None
+    saved = next((row for row in rows if row["id"] == query.get("guardado")
+                  and row["recorded_by"] == user["code"]), None)
+    notice = ""
+    if saved:
+        notice = ("Duplicado · Guardado para revisión del supervisor." if saved["review"] == "pending"
+                  else "Pieza guardada.")
+    table = sheet.grid(prepared, counts, user, csrf, scope, totals, new_row,
+                       revision_of=lambda row: ledger.revision(db, row["id"]),
+                       audit_of=lambda row: sheet.query_link(**params, historial=row["id"]) + "#historial"
+                       if user["role"] == "developer" or (operator and row["employee"] == user["code"]) else "",
+                       message=notice, week=week)
     assignment = ""
-    if not operator and day == today():
+    if not operator and capture_week:
         choices = []
         for position in (1, 2):
             current = next((row["employee"] for row in slots if row["position"] == position), "")
-            options = "".join(f'<option value="{escape(code)}" {"selected" if code == current else ""}>'
-                              f'{escape(name)} · {escape(code)}</option>' for code, name in staff.items())
             choices.append(f'<label>Operario {position}<select name="employee{position}">'
-                           f'<option value="">Sin asignar</option>{options}</select></label>')
-        assignment = '<div class="assignment">' + form(
-            "assign", csrf, scope + "".join(choices) + '<button>Guardar asignación</button>') + '</div>'
-    totals = sum(row["pieces"] for row in rows if row["review"] == "approved")
-    counts = ledger.report_counts(db, rows, shift, laser)
-    search = query.get("orden", "").strip()[:80]
-    search_key = re.sub(r"[\s/]+", "", search.upper()).removeprefix("SO-")
-    selected = [row for row in rows if search_key in row["order_line"]
-                or search.upper() in row["reference"].upper()]
-    report = "".join(report_row(row, counts.get(row["order_line"]), user, csrf, scope)
-                     for row in selected)
-    capture = ""
-    if day == today() and slots and (operator or user["role"] == "developer"):
-        picker = ""
-        if not operator:
-            options = "".join(f'<option value="{escape(row["employee"])}">{escape(row["employee"])}</option>'
-                              for row in slots)
-            picker = f'<label>Operario<select name="employee">{options}</select></label>'
-        saved_id = query.get("guardado")
-        saved = next((row for row in rows if row["id"] == saved_id
-                      and row["recorded_by"] == user["code"]), None)
-        notice = ""
-        if saved and saved["review"] == "pending":
-            notice = (f'<p class="alert" role="status"><strong>Duplicado.</strong> '
-                      f'La orden {escape(saved["order_number"])} · línea {escape(saved["line"])} '
-                      'quedó pendiente. Espera la revisión del supervisor.</p>')
-        elif saved and saved["review"] == "approved":
-            notice = '<p class="confirmation" role="status">Pieza guardada.</p>'
-        capture = '<section class="capture"><h2>Captura de piezas</h2>' + notice + form(
-            "production", csrf, scope + hidden("id", token_hex(16))
-            + production_fields() + picker + '<button>Guardar pieza</button>') + '</section>'
-    empty_message = "Sin registros para esta búsqueda." if search else "Sin registros en esta fecha y turno."
-    report = report or f'<tr><td colspan="13">{empty_message}</td></tr>'
-    report_scope = hidden("vista", "turno") + hidden("laser", laser)
-    date_shift = ""
-    if not operator:
-        shift_options = "".join(
-            f'<option value="{n}" {"selected" if n == shift else ""}>Turno {n}</option>' for n in (1, 2))
-        date_shift = f"""<label>Fecha de producción<input name="fecha" type="date" value="{day}" required></label>
-            <label>Turno<select name="turno">{shift_options}</select></label>"""
-    else:
-        date_shift = hidden("fecha", day) + hidden("turno", shift)
-    filters = f"""<form class="report-filter" method="get" action="/">
-        {report_scope}{date_shift}
+                           '<option value="">Sin asignar</option>' + "".join(
+                f'<option value="{escape(code)}" {"selected" if code == current else ""}>{escape(name)}</option>'
+                for code, name in staff.items()) + '</select></label>')
+        assignment = ('<details class="assignment"><summary>Asignar operarios</summary>' +
+                      form("assign", csrf, scope + hidden("day", day) + "".join(choices)
+                           + '<button>Guardar asignación</button>') + '</details>')
+    selector = (f'<label>Semana<select name="semana">{week_options(db, open_week, week, True)}</select></label>'
+                if not operator else "")
+    filters = f"""<form class="report-filter" method="get" action="/">{report_scope}{selector}
         <label>Buscar orden<input type="search" name="orden" value="{escape(search)}" maxlength="80"></label>
-        <button class="quiet">{"Buscar" if operator else "Aplicar filtros"}</button></form>"""
-    history = audit_panel(db, user, query.get("historial"), day, shift, laser)
-    deleted_sql = "SELECT * FROM production WHERE day = ? AND shift = ? AND laser = ? AND deleted_at IS NOT NULL"
-    deleted_args = (day, shift, laser)
+        <button class="quiet">Buscar</button></form>"""
+    places = [(shift, laser)] if operator else [tuple(row) for row in db.execute(
+        """SELECT DISTINCT shift, laser FROM production WHERE week = ? AND deleted_at IS NULL
+           ORDER BY shift, laser""", (week,))]
+    tabs = '<nav class="sheet-tabs" aria-label="Hojas de láser">' + "".join(
+        f'<a href="{sheet.query_link(vista="turno", turno=t, laser=n, semana=week)}"'
+        f'{" aria-current=page" if (t, n) == (shift, laser) else ""}>Turno {t} · Láser {n}</a>'
+        for t, n in places) + '</nav>'
+    history = audit_panel(db, user, query.get("historial"), week, shift, laser)
+    deleted = ""
     if operator:
-        deleted_sql += " AND employee = ?"
-        deleted_args += (user["code"],)
-    deleted_links = "".join(
-        f'<li>{audit_link(row, row["reference"])}</li>' for row in db.execute(deleted_sql, deleted_args))
-    deleted = (f'<details><summary>Registros eliminados</summary><ul>{deleted_links}</ul></details>'
-               if deleted_links else "")
-    title = f"Láser {laser} · Turno {shift}"
-    heading = f"""<div class="page-heading"><div>{back}<h1>{title}</h1>
-        <p>{day} · {totals:,} piezas confirmadas</p>
-        {f'<p>Orden buscada: {escape(search)}</p>' if search else ''}</div>
-        {'' if operator else '<button class="quiet print-button" type="button" hidden>Imprimir reporte</button>'}</div>"""
-    if assignment:
-        assignment = f'<details class="assignment"><summary>Asignar operarios</summary>{assignment}</details>'
-    cpa_scope = report_scope + hidden("fecha", day) + hidden("turno", shift) + hidden("orden", search)
-    cpa_lookup = cpa_panel(cpa_scope, query.get("consulta_cpa"))
-    return f"""{heading}{capture}
-        <section class="report-section"><div class="report-tools">{filters}{assignment}</div>
-        <div class="sheet production-sheet" tabindex="0" role="region" aria-label="Tabla de producción">
-        <table aria-label="Reporte del láser {laser}"><thead><tr>
-        <th scope="col">FECHA</th><th scope="col"># DE ORDEN</th><th scope="col">LINEA</th>
-        <th scope="col" class="number"># PIEZAS</th><th scope="col">COMENTARIOS</th>
-        <th scope="col">* REPRINT *</th><th scope="col">Orden + Linea</th>
-        <th scope="col" class="number">REPETICIONES</th><th scope="col">SKU</th><th scope="col">CPA (SUPERVISOR)</th>
-        <th scope="col" class="number">DUP.</th><th scope="col">Operario</th><th scope="col">Estado y acciones</th>
-        </tr></thead><tbody>{report}</tbody><tfoot><tr>
-        <th scope="row" colspan="3">Total del día · Turno {shift}</th>
-        <td class="number">{totals:,}</td><td colspan="9">Piezas confirmadas</td>
-        </tr></tfoot></table></div>{cpa_lookup}{deleted}{history}</section>"""
+        deleted_rows = db.execute("""SELECT * FROM production WHERE week=? AND shift=? AND laser=?
+            AND employee=? AND deleted_at IS NOT NULL""", (week, shift, laser, user["code"])).fetchall()
+        if deleted_rows:
+            links = "".join(f'<li>{audit_link(row, row["reference"])}</li>' for row in deleted_rows)
+            deleted = f'<details><summary>Registros eliminados</summary><ul>{links}</ul></details>'
+    cpa_lookup = cpa_panel(report_scope + hidden("semana", week) + hidden("orden", search),
+                           query.get("consulta_cpa"))
+    tools = f'<div class="report-tools">{filters}{assignment}</div>'
+    return f"""<div class="page-heading"><div>{back}<h1>Láser {laser} · Turno {shift}</h1>
+        <p data-sheet-summary>{weeks.label(week)} · {totals:,} piezas confirmadas</p></div>
+        {'' if operator else '<button class="quiet print-button" type="button" hidden>Imprimir reporte</button>'}
+        </div><section class="report-section">{tools}{table}{tabs}{cpa_lookup}{deleted}{history}</section>"""
+
+
+def history_report(db, open_week, staff, user, csrf, query):
+    selected = query.get("semana", "")
+    available = {row["week"] for row in db.execute("SELECT DISTINCT week FROM production WHERE week < ?", (open_week,))}
+    if selected not in available:
+        selected = ""
+    params = {"vista": "historia", "semana": selected}
+    args = (open_week, selected, selected)
+    predicate = "week < ? AND (? = '' OR week = ?) AND deleted_at IS NULL"
+    summary = db.execute(f"""SELECT COUNT(*), COALESCE(SUM(CASE WHEN review='approved' THEN pieces END), 0)
+        FROM production WHERE {predicate}""", args).fetchone()
+    count, total = summary
+    try:
+        page_number = max(1, min(int(query.get("pagina", "1")), max(1, (count + 99) // 100)))
+    except ValueError:
+        page_number = 1
+    params["pagina"] = page_number
+    rows = db.execute(f"SELECT * FROM production WHERE {predicate} ORDER BY day DESC, rowid LIMIT 100 OFFSET ?",
+                      (*args, (page_number - 1) * 100)).fetchall()
+    prepared, counts = sheet_rows(db, rows, staff, user, open_week, True)
+    table = sheet.grid(prepared, counts, user, csrf, hidden("semana", selected) + hidden("pagina", page_number),
+                       total, history=True, revision_of=lambda row: ledger.revision(db, row["id"]),
+                       audit_of=lambda row: sheet.query_link(**params, historial=row["id"]) + "#historial"
+                       if user["role"] == "developer" else "", week=selected, source="historia")
+    buttons = "".join(
+        f'<a href="{sheet.query_link(**(params | {"pagina": n}))}">{label}</a>'
+        for n, label in ((page_number - 1, "Anterior"), (page_number + 1, "Siguiente"))
+        if 1 <= n <= (count + 99) // 100)
+    history = audit_panel(db, user, query.get("historial"), max_week=open_week)
+    return f"""<h1>Historia</h1><section class="report-section">
+        <form class="report-filter" method="get" action="/">{hidden("vista", "historia")}
+        <label>Semana<select name="semana"><option value="">Todas</option>
+        {week_options(db, open_week, selected, False)}</select></label><button class="quiet">Ver semana</button></form>
+        {table}<nav class="sheet-tabs" aria-label="Páginas de Historia"><p>{count:,} registros · Página {page_number}</p>
+        {buttons}</nav>{history}</section>"""
 
 
 def cpa_panel(scope, query):
@@ -472,53 +558,26 @@ def cpa_panel(scope, query):
         <button>Buscar en CPA</button></form>{result}</details>"""
 
 
-def production_fields(row=None):
-    values = dict(row) if row is not None else {}
-    def value(key):
-        return escape(str(values.get(key, "")))
-    return f"""<label class="field-order">Orden<input name="order_number" value="{value('order_number')}"
-        inputmode="numeric" maxlength="27" required></label>
-        <label class="field-line">Línea<input name="line" value="{value('line')}" autocapitalize="characters" maxlength="12" required></label>
-        <label class="field-pieces">Piezas<input name="pieces" type="number" value="{value('pieces')}" min="1" max="100000" required></label>
-        <label class="field-comments">Comentario<input name="comments" value="{value('comments')}" maxlength="300"></label>
-        <label class="field-sku">SKU<input name="sku" value="{value('sku')}" maxlength="60"></label>"""
-
-
-def report_row(row, counts, user, csrf, scope):
-    statuses = {"approved": "Confirmado", "pending": "Duplicado · Por revisar", "rejected": "Descartado"}
-    colleague = user["role"] == "operator" and row["employee"] != user["code"]
-    controls = ""
-    if user["role"] == "developer" or (user["role"] == "operator" and row["employee"] == user["code"]):
-        key = scope + hidden("record", row["id"])
-        edit = form("edit-production", csrf, key + production_fields(row) + '<button>Guardar corrección</button>')
-        delete = form("delete-production", csrf, key + '<button class="danger">Confirmar eliminación</button>')
-        controls = f'<details><summary>Corregir</summary>{edit}</details><details><summary>Eliminar</summary>{delete}</details>'
-    link = ""
-    if user["role"] != "operator" or row["employee"] == user["code"]:
-        link = audit_link(row, "Historial")
-    actions = f'<details class="row-actions"><summary>Acciones</summary>{controls}{link}</details>' if controls or link else ""
-    return f"""<tr{' class="colleague"' if colleague else ''}><td>{escape(row['day'])}</td><td>{escape(row['order_number'])}</td>
-        <td>{escape(row['line'])}</td><td class="number">{row['pieces']:,}</td><td>{escape(row['comments'])}</td>
-        <td>{'*' if counts and counts['reprint'] else ''}</td>
-        <td>{escape(row['order_line'])}</td><td class="number">{counts['local'] if counts else 0}</td>
-        <td>{escape(row['sku'])}</td><td>—</td><td class="number">{counts['total'] if counts else 0}</td>
-        <td>{escape(row['employee'])}</td><td><span class="pill {row['review']}">{statuses[row['review']]}</span>
-        {actions}</td></tr>"""
-
-
 def audit_link(row, label):
-    url = urlencode({"vista": "turno", "fecha": row["day"], "turno": row["shift"],
+    url = urlencode({"vista": "turno", "semana": row["week"], "turno": row["shift"],
                      "laser": row["laser"], "historial": row["id"]})
     return f'<a href="/?{escape(url)}#historial">{escape(label)}</a>'
 
 
-def audit_panel(db, user, record_id, day, shift, laser):
+def audit_panel(db, user, record_id, week=None, shift=None, laser=None, max_week=None):
     if not record_id:
         return ""
     row = ledger.get_record(db, record_id)
-    if not row or (row["day"], row["shift"], row["laser"]) != (day, shift, laser):
+    if not row:
         return ""
-    if user["role"] == "operator" and row["employee"] != user["code"]:
+    if max_week:
+        if user["role"] != "developer" or row["week"] >= max_week:
+            return ""
+    elif (row["week"], row["shift"], row["laser"]) != (week, shift, laser):
+        return ""
+    if user["role"] != "developer" and not (
+        user["role"] == "operator" and row["employee"] == user["code"]
+    ):
         return ""
     def snapshot(payload):
         if not payload:
@@ -629,12 +688,13 @@ def index(request: Request):
 
 
 async def fields(request):
+    limit = 512_000 if request.path_params["action"] in ("production", "delete-production") else 8192
     if request.headers.get("content-type", "").split(";")[0] != "application/x-www-form-urlencoded":
         raise HTTPException(415)
     body = bytearray()
     async for chunk in request.stream():
         body.extend(chunk)
-        if len(body) > 8192:
+        if len(body) > limit:
             raise HTTPException(413)
     try:
         parsed = parse_qs(body.decode(), keep_blank_values=True, max_num_fields=16)
@@ -677,8 +737,9 @@ def login(db, request, data):
     return token, "", 200
 
 
-def slot(data):
-    if data.get("day") != today():
+def slot(data, capture=False):
+    day = weeks.parse_day(data.get("day", ""))
+    if not capture and day != today():
         raise ValueError("Cambió la fecha de operación. Vuelve a seleccionar el turno.")
     try:
         shift, laser = int(data.get("shift", "")), int(data.get("laser", ""))
@@ -686,7 +747,7 @@ def slot(data):
         raise ValueError("Selecciona un turno y un láser válidos.") from None
     if shift not in (1, 2) or not 1 <= laser <= 11:
         raise ValueError("Selecciona un turno y un láser válidos.")
-    return data["day"], shift, laser
+    return day, shift, laser
 
 
 def assign(db, data):
@@ -719,7 +780,11 @@ def may_capture(db, user, location, code):
 
 
 def record(db, user, data):
-    location = slot(data)
+    location = slot(data, capture=True)
+    day, shift, laser = location
+    week = weeks.week_of(day)
+    if week != weeks.current(db)["open_week"] or week != weeks.week_of(today()) or day > today():
+        raise ValueError("Registra piezas de una fecha transcurrida de la semana abierta.")
     order, line, pieces, comments, sku, key = ledger.values(data)
     request_id = data.get("id", "")
     if not re.fullmatch(r"[a-f0-9]{32}", request_id):
@@ -732,16 +797,38 @@ def record(db, user, data):
         if tuple(previous[field] for field in frozen) != (*location, code, order, line, pieces,
                                                          comments, sku, user["code"]):
             raise HTTPException(409)
-        return
-    if not may_capture(db, user, location, code):
-        raise HTTPException(403)
+        return previous
+    if (not may_capture(db, user, location, code) or
+            (user["role"] == "operator" and not may_capture(db, user, (today(), shift, laser), code))):
+        raise HTTPException(403, "Selecciona un operario asignado a ese láser, turno y fecha.")
     db.execute("""
         INSERT INTO production (id, day, shift, laser, employee, reference, pieces, recorded_by, review,
-                                order_number, line, comments, sku, order_line)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                order_number, line, comments, sku, order_line, week)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (request_id, *location, code, f"{order} / {line}", pieces, user["code"],
-          ledger.review_status(db, key, request_id), order, line, comments, sku, key))
+          ledger.review_status(db, key, request_id), order, line, comments, sku, key, week))
     ledger.audit(db, request_id, user["code"], "Registro")
+    return ledger.get_record(db, request_id)
+
+
+def record_batch(db, user, data):
+    if user["role"] != "supervisor":
+        raise HTTPException(403, "El pegado de filas lo hace el supervisor.")
+    batch = json.loads(data["batch"])
+    allowed = {"id", "day", "order_number", "line", "pieces", "comments", "sku", "employee"}
+    if not isinstance(batch, list) or not 1 <= len(batch) <= 200:
+        raise ValueError("Pega entre 1 y 200 filas por operación.")
+    saved = []
+    for number, row in enumerate(batch, 1):
+        if (not isinstance(row, dict) or set(row) - allowed
+                or not all(isinstance(value, str) for value in row.values())):
+            raise ValueError(f"Fila {number}: datos de pegado inválidos.")
+        try:
+            saved.append(record(db, user, data | row))
+        except (ValueError, HTTPException) as exc:
+            detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            raise ValueError(f"Fila {number}: {detail}") from None
+    return saved
 
 
 def change_production(db, user, data, action):
@@ -749,24 +836,49 @@ def change_production(db, user, data, action):
     row = ledger.get_record(db, key)
     if not row or row["deleted_at"]:
         raise HTTPException(404)
-    location = (row["day"], row["shift"], row["laser"])
-    if user["role"] == "operator":
-        if row["employee"] != user["code"] or row["day"] != today() or not may_capture(db, user, location, user["code"]):
-            raise HTTPException(403)
+    open_week = weeks.current(db)["open_week"]
+    if not can_edit_row(db, user, row, open_week):
+        raise HTTPException(403)
+    if data.get("revision") is not None and data["revision"] != str(ledger.revision(db, key)):
+        raise HTTPException(409, "La fila cambió. Recarga la hoja antes de volver a guardar.")
     if action == "delete-production":
+        if row["week"] != open_week:
+            raise HTTPException(403, "Las filas archivadas solo admiten correcciones.")
+        if user["role"] == "supervisor" and row["recorded_by"] != user["code"]:
+            raise HTTPException(403, "Solo puedes eliminar tus propias capturas.")
         db.execute("UPDATE production SET deleted_at = ? WHERE id = ?",
                    (datetime.now(timezone.utc).isoformat(timespec="seconds"), key))
         ledger.audit(db, key, user["code"], "Eliminación", row)
-        return
+        return ledger.get_record(db, key)
     order, line, pieces, comments, sku, pair = ledger.values(data)
+    code = row["employee"]
+    if user["role"] != "operator" and data.get("employee"):
+        code = data["employee"]
+        if code != row["employee"] and not db.execute(
+            "SELECT 1 FROM employees WHERE code=? AND role='operator' AND active=1", (code,)
+        ).fetchone():
+            raise ValueError("Selecciona un operario activo.")
     review, reviewer = row["review"], row["reviewed_by"]
     if pair != row["order_line"] or (review == "rejected" and pieces != row["pieces"]):
         review, reviewer = ledger.review_status(db, pair, key), None
     db.execute("""
         UPDATE production SET order_number = ?, line = ?, pieces = ?, comments = ?, sku = ?,
-               reference = ?, order_line = ?, review = ?, reviewed_by = ? WHERE id = ?
-    """, (order, line, pieces, comments, sku, f"{order} / {line}", pair, review, reviewer, key))
+               reference = ?, order_line = ?, review = ?, reviewed_by = ?, employee = ? WHERE id = ?
+    """, (order, line, pieces, comments, sku, f"{order} / {line}", pair, review, reviewer, code, key))
     ledger.audit(db, key, user["code"], "Corrección", row)
+    return ledger.get_record(db, key)
+
+
+def undo_batch(db, user, data):
+    if user["role"] != "supervisor":
+        raise HTTPException(403)
+    entries = json.loads(data["undo_batch"])
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 200:
+        raise ValueError("El bloque para deshacer es inválido.")
+    if any(not isinstance(item, dict) or set(item) != {"record", "revision"} or
+           not all(isinstance(value, str) for value in item.values()) for item in entries):
+        raise ValueError("El bloque para deshacer es inválido.")
+    return [change_production(db, user, item, "delete-production") for item in entries]
 
 
 @app.post("/{action}")
@@ -776,16 +888,19 @@ async def mutate(action: str, request: Request):
 
 def handle_mutation(action, request, data):
     shift = data.get("shift", "1")
+    json_response = request.headers.get("accept") == "application/json"
+    saved = []
     location = "/?turno=2" if shift == "2" else "/"
     if action in ("assign", "production", "edit-production", "delete-production") and re.fullmatch(r"(?:[1-9]|1[01])", data.get("laser", "")):
         location = f'/?vista=turno&turno={shift if shift == "2" else "1"}&laser={data["laser"]}'
     if action in ("employees", "reset-account", "remove-account"):
         location = "/?vista=personal#cuentas"
-    if action in ("edit-production", "delete-production"):
-        try:
-            location += "&fecha=" + date.fromisoformat(data.get("day", "")).isoformat()
-        except ValueError:
-            pass
+    if action in ("edit-production", "delete-production", "production"):
+        if data.get("origen") == "historia":
+            location = "/?" + urlencode({"vista": "historia", "semana": data.get("semana", ""),
+                                          "pagina": data.get("pagina", "1")})
+        elif data.get("semana"):
+            location += "&" + urlencode({"semana": data["semana"]})
     if action == "reprint":
         location = "/?vista=personal#reprints"
     if action == "review":
@@ -846,21 +961,34 @@ def handle_mutation(action, request, data):
                     order, line = ledger.order_fields(data)
                     db.execute("INSERT OR IGNORE INTO valid_reprints VALUES (?, ?, ?)",
                                (ledger.reference_key(order, line), order, line))
-            elif action in ("edit-production", "delete-production") and user["role"] in ("developer", "operator"):
-                change_production(db, user, data, action)
-            elif action == "production" and user["role"] in ("developer", "operator"):
-                record(db, user, data)
-                saved_query = urlencode({"vista": "turno", "turno": int(shift),
-                                         "laser": int(data["laser"]), "guardado": data["id"]})
+            elif action in ("edit-production", "delete-production"):
+                if action == "delete-production" and "undo_batch" in data:
+                    saved = undo_batch(db, user, data)
+                else:
+                    saved = [change_production(db, user, data, action)]
+            elif action == "production":
+                saved = record_batch(db, user, data) if "batch" in data else [record(db, user, data)]
+                latest = saved[-1]
+                saved_query = urlencode({"vista": "turno", "turno": latest["shift"], "laser": latest["laser"],
+                                         "semana": latest["week"], "guardado": latest["id"]})
                 response.headers["location"] = f"/?{saved_query}"
             else:
                 raise HTTPException(403)
+            if json_response and saved:
+                result = [{"id": row["id"], "state": row["review"],
+                           "revision": str(ledger.revision(db, row["id"]))} for row in saved]
     except sqlite3.IntegrityError:
         error = ("Ese operador ya tiene otro láser en el mismo turno." if action == "assign"
                  else "Ese código de empleado ya existe.")
+        if json_response:
+            return JSONResponse({"detail": error}, 409)
         return render(request, error, 409, dict(parse_qsl(urlsplit(location).query)))
     except ValueError as exc:
+        if json_response:
+            return JSONResponse({"detail": str(exc)}, 400)
         return render(request, str(exc), 400, dict(parse_qsl(urlsplit(location).query)))
+    if json_response and saved:
+        return JSONResponse({"records": result})
     return response
 
 
