@@ -61,8 +61,8 @@ Orden y nombres idénticos al sheet. Las columnas de la app que no existen en el
 | I | SKU | dato | sí | Captura manual |
 | J | CPA (SUPERVISOR) | pendiente | no | Muestra "—" hasta la integración con CPA (Fase 6) |
 | K | DUP. | fórmula | no | Conteo en toda la producción de la app |
-| L | Operario | de la app | no | Nombre del operario que registró |
-| M | Estado | de la app | no | Confirmado, Por revisar o Descartado |
+| L | Operario | automática | no | Se llena sola con el código del operario que registra. Oculta para el operario; visible y editable solo para supervisor y desarrollador |
+| M | Estado | de la app | no | Confirmado, Por revisar o Descartado. Visible para todos |
 
 Las columnas F, G, H, J y K llevan fondo `#101A14` y texto `#8FA196`. Son lo que en una hoja sería una fórmula: se distinguen a simple vista de lo que se escribe.
 
@@ -77,7 +77,19 @@ Al seleccionar una celda, la barra superior muestra:
 
 Siempre hay una fila vacía al final, como en el sheet. Escribir en ella y pulsar Enter crea el registro y deja una fila nueva abajo. La fila nueva no aparece con formulario encima; es la última fila de la cuadrícula.
 
-Para el supervisor, la fila nueva pide el operario en la columna L antes de guardar. Para el operario, L es automática.
+La columna L (Operario) se llena sola. El operario no la ve ni la escribe. El supervisor la ve y puede corregirla si un registro quedó a nombre de otra persona.
+
+## 2b. Ciclo semanal e hoja de Historia
+
+Cada hoja de láser es la semana en curso. No hay que empezar de cero cada día.
+
+- **Semana:** de lunes a domingo, en zona horaria de República Dominicana. La hoja del láser muestra solo la semana actual y su turno seleccionado. Supuesto a confirmar: lunes a domingo.
+- **Cierre:** al terminar el domingo a las 23:59, una tarea programada archiva todas las filas de la semana en la hoja **Historia** y vacía la hoja del láser para la semana siguiente.
+- **Historia:** una sola hoja con todos los registros de todas las semanas, con las mismas columnas más Láser, Turno, Semana y Operario. Es de solo lectura. Solo el desarrollador puede corregirla, y cada corrección queda en el historial de cambios.
+- **Datos en la semana:** el número de la semana (por ejemplo, `2026-S47`) se guarda en cada registro. Así Historia y la hoja semanal salen de la misma tabla y no hay que copiar datos a mano.
+- **Migración:** la pestaña Historia del sheet (unas 128 mil filas) se importa a la hoja Historia como primer paso. Eso resuelve la decisión de Fase 1 de `docs/PLAN.md`.
+- **Reglas que cruzan semanas:** *Repeticiones* y *Dup.* siguen contando en toda la historia, no solo en la semana actual. Si una orden se repite en una semana distinta, la fila queda por revisión como antes.
+- **Respaldo antes del cierre:** la tarea de cierre hace un respaldo de la base antes de mover las filas. Si falla, no vacía la hoja y avisa al supervisor en Notificaciones.
 
 ### Fila de totales
 
@@ -110,7 +122,7 @@ Las celdas bloqueadas (filas de otro operario, columnas calculadas) se pueden se
 
 ## 4. Permisos visibles
 
-- **Operario:** ve todas las filas de su láser y turno. Puede editar solo sus filas. Las demás aparecen en tono apagado (`#516359` sobre fondo de hoja) sin cursor de edición.
+- **Operario:** ve todas las filas de su láser y turno de la semana. Puede editar solo sus filas. Las demás aparecen en tono apagado (`#516359` sobre fondo de hoja) sin cursor de edición. No ve la columna L (Operario), que se llena sola.
 - **Supervisor:** todas las filas editables, con la columna L visible y editable.
 - **Desarrollador:** igual que supervisor, con acceso a historial de cambios desde el menú de fila.
 
@@ -181,10 +193,20 @@ Manuales, en tablet de cada turno:
 3. Agregar la navegación por teclado y la barra de fórmulas (nivel 1).
 4. Agregar la fila nueva al final y el pegado desde hojas de cálculo.
 5. Quitar los `<details>` por fila y pasar eliminar al menú de fila.
-6. Pruebas automatizadas y prueba manual en tablet, en paralelo con el sheet (Fase 5 de `docs/PLAN.md`).
+6. Agregar la semana (`week`) a cada registro y la vista semanal por láser y turno.
+7. Crear la hoja Historia y su importación desde la pestaña Historia del sheet.
+8. Tarea de cierre semanal con respaldo previo y aviso en Notificaciones si falla.
+9. Pruebas automatizadas y prueba manual en tablet, en paralelo con el sheet (Fase 5 de `docs/PLAN.md`).
 
 ## 10. Decisiones que necesito confirmar
 
-- [ ] ¿La columna **Operario** y **Estado** (de la app) van al final de la hoja, como se propone, o se ocultan para el operario?
+Decidido:
+
+- Columna **Operario** automática y oculta para el operario. **Estado** visible para todos.
+- Cada hoja de láser es la semana en curso. Al cerrar la semana, las filas pasan a la hoja **Historia**.
+
+Pendiente:
+
+- [ ] ¿La semana va de lunes a domingo? Supuesto del plan, a confirmar.
 - [ ] ¿Pegar desde Google Sheets se permite al operario, o solo al supervisor?
-- [ ] ¿Las pestañas de hoja muestran todos los láseres del día para el supervisor, o solo el láser seleccionado?
+- [ ] ¿Las pestañas de hoja muestran todos los láseres de la semana para el supervisor, o solo el láser seleccionado?
