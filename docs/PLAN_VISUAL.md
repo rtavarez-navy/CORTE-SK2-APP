@@ -31,7 +31,8 @@ Reglas:
 - El verde `#3DD65A` solo marca lo que se puede tocar o lo que está activo. Nunca decora.
 - El rojo ámbar tiene dos usos: el nombre "Proyecto Ámbar" en la marca, y las alertas. Para que la alerta no se confunda con la marca, la alerta es siempre un bloque con fondo rojo tenue, borde y texto explícito ("Duplicado", "Sin operario"), nunca solo un texto rojo.
 - Si todo está en alerta, nada lo está.
-- Modo supervisor en reporte o impresión: versión clara con el mismo verde profundo sobre papel `#F4F7F5`. Se decide en la Fase 3, según cómo lo usen en la oficina.
+- Modo claro para reporte e impresión: mismo verde profundo `#1F7A3A` como acento, sobre papel `#F4F7F5`, con texto `#0C1410`. Las alertas usan el mismo rojo `#E0392F` con fondo tenue. Ambos modos comparten nombres de color y reglas.
+- Modo oscuro para estación y resumen; modo claro para reporte e impresión. El usuario lo eligió así en ambos sentidos: se implementan los dos.
 
 ## 3. Tipografía
 
@@ -146,7 +147,10 @@ Decidido: la marca muestra "CORTE SAKIRA 2 & Proyecto Ámbar" en la cabecera y e
 
 Pendientes:
 
-- [ ] ¿Modo oscuro para todo, o modo claro para el reporte impreso? Propuesta: oscuro en estación y resumen, claro en reporte.
+Decidido: modo oscuro en estación y resumen, y modo claro en reporte e impresión.
+
+Pendiente:
+
 - [ ] ¿Se entrega el logo vectorizado o basta un PNG en 2x? Propuesta: PNG en 2x ahora, SVG cuando haya presupuesto para vectorizar.
 
 ## 11. Orden de implementación
