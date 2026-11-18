@@ -161,3 +161,7 @@ Pendiente:
 4. Rediseñar la estación del operario, que es la pantalla más usada.
 5. Rediseñar el resumen y las tarjetas de láser.
 6. Rediseñar el reporte y la prueba en tablet de cada turno antes de dar por cerrada la Fase 3.
+
+## Complemento
+
+El diseño detallado de la hoja de cada láser (cuadrícula, teclado, fórmulas y pruebas) está en `docs/PLAN_HOJA_LASER.md`.
