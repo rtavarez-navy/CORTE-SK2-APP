@@ -25,3 +25,18 @@ Sustituye la ruta por un archivo en un directorio local que exista. El código c
 Ejecuta Uvicorn detrás de HTTPS en la red interna, sin `CORTE_DEV_HTTP`. La base SQLite debe residir en disco local persistente del servidor. Conserva una copia de respaldo antes de cada actualización y mantén esa base fuera del repositorio. Si hay un proxy, configura Uvicorn para aceptar cabeceras reenviadas solo desde ese proxy, de forma que el límite de acceso por IP distinga las estaciones.
 
 La aplicación arranca con `web.app:app`. Al actualizar desde una versión previa, el servidor migra automáticamente las plazas de los láseres y el estado de revisión. Los registros previos se conservan confirmados.
+
+## Consulta CPA de solo lectura
+
+Configura `CPA_DB` con la ruta absoluta al SQLite que actualiza URA y reinicia el servidor. En Windows, por ejemplo, en PowerShell:
+
+```powershell
+$env:CPA_DB = '\\cs-600\Control_Produccion_Data\cpa_database.db'
+$env:CPA_FACTORY = 'JuiceSakira2'
+```
+
+En Linux usa la ruta local donde ya está montado el recurso de red. En Codespaces puedes usar una copia de prueba accesible desde el entorno. La cuenta que ejecuta CORTE SK2 necesita permiso de lectura. El archivo CPA es independiente de `CORTE_DB`.
+
+Desde el reporte de un láser abre **Consultar orden en CPA**. La búsqueda exige un número exacto, con o sin prefijo SO-, limita los resultados a la fábrica configurada y muestra el Set, la cantidad CPA y el estado de línea. El valor por defecto de fábrica es `JuiceSakira2`.
+
+Si el esquema usa nombres diferentes o ambiguos, configura los nombres exactos mediante `CPA_COLUMN_ORDER`, `CPA_COLUMN_SET`, `CPA_COLUMN_QTY`, `CPA_COLUMN_STATUS` y `CPA_COLUMN_FACTORY`. Si hay más de una columna de cantidad candidata, verifica cuál representa las piezas de la línea antes de elegir. El registro de producción sigue siendo manual.

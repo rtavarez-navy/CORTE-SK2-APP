@@ -18,6 +18,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
+from web.cpa import CpaUnavailable, lookup
+
 INITIAL_PASSWORD = "12345"
 ROLES = {"developer": "Desarrollador", "supervisor": "Supervisor", "operator": "Operador"}
 ZONE = ZoneInfo("America/Santo_Domingo")
@@ -225,7 +227,7 @@ def dashboard(db, request, user, csrf, error, status, query=None):
                 SELECT * FROM production WHERE day = ? AND shift = ? AND laser = ? AND employee = ?
                 ORDER BY rowid
             """, (day, current["shift"], current["laser"], user["code"])).fetchall()
-            body = laser_report(day, current["shift"], current["laser"], [current], rows, staff, user, csrf)
+            body = laser_report(day, current["shift"], current["laser"], [current], rows, staff, user, csrf, query.get("cpa"))
         return page("Mi producción", toolbar + body, error, status, wide=True)
 
     links = [
@@ -255,7 +257,7 @@ def dashboard(db, request, user, csrf, error, status, query=None):
                             day, shift, number,
                             [row for row in slots if row["shift"] == shift and row["laser"] == number],
                             [row for row in production if row["shift"] == shift and row["laser"] == number],
-                            staff, user, csrf))
+                            staff, user, csrf, query.get("cpa")))
             else:
                 body = shift_grid(shift, slots, production, staff)
         else:
@@ -292,7 +294,7 @@ def shift_grid(shift, slots, production, staff):
     return f'<h2>Turno {shift} · Láseres</h2><div class="laser-grid">{"".join(cards)}</div>'
 
 
-def laser_report(day, shift, laser, slots, rows, staff, user, csrf):
+def laser_report(day, shift, laser, slots, rows, staff, user, csrf, cpa_order=None):
     scope = hidden("day", day) + hidden("shift", shift) + hidden("laser", laser)
     operator = user["role"] == "operator"
     assignment = ""
@@ -328,10 +330,38 @@ def laser_report(day, shift, laser, slots, rows, staff, user, csrf):
             min="1" max="100000" required></td><td><button form="capture">Registrar</button></td></tr>"""
     if not table_rows:
         table_rows = '<tr><td colspan="5">Sin registros para este turno.</td></tr>'
-    return f"""<section><h2>Láser {laser:02} · Turno {shift}</h2>{assignment}{capture}
+    return f"""<section><h2>Láser {laser:02} · Turno {shift}</h2>{assignment}{cpa_panel(shift, laser, cpa_order)}{capture}
         <div class="sheet"><table aria-label="Reporte del láser {laser}">
         <thead><tr><th>#</th><th>Orden / línea</th><th>Operario</th><th>Piezas</th><th>Estado</th></tr></thead>
         <tbody>{table_rows}</tbody></table></div></section>"""
+
+
+def cpa_panel(shift, laser, order):
+    value = (order or "").strip()[:32]
+    result = ""
+    if order is not None:
+        try:
+            rows, truncated = lookup(order.strip())
+        except (ValueError, CpaUnavailable) as exc:
+            result = f'<p role="status">{escape(str(exc))}</p>'
+        else:
+            if not rows:
+                result = '<p role="status">No se encontraron líneas para esa orden en la fábrica configurada.</p>'
+            else:
+                body = "".join(
+                    "<tr>" + "".join(f"<td>{escape(str(cell)) if cell is not None else '—'}</td>" for cell in row)
+                    + "</tr>" for row in rows
+                )
+                notice = '<p>Se muestran las primeras 100 líneas.</p>' if truncated else ""
+                result = f"""<div class="sheet"><table aria-label="Líneas de CPA"><thead>
+                    <tr><th>Orden</th><th>Set</th><th>Cantidad CPA</th><th>Estado de línea</th></tr>
+                    </thead><tbody>{body}</tbody></table></div>{notice}"""
+    return f"""<details class="recovery" {"open" if order is not None else ""}>
+        <summary>Consultar orden en CPA</summary><form method="get" action="/">
+        {hidden('vista', 'turno')}{hidden('turno', shift)}{hidden('laser', laser)}
+        <label>Número de orden<input name="cpa" value="{escape(value)}" maxlength="32" required></label>
+        <button>Buscar en CPA</button></form>{result}</details>"""
+
 
 
 def notifications(db, waiting, pending, staff, csrf):
