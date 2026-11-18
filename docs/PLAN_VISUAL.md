@@ -10,7 +10,7 @@ El logo tiene tres ideas que la interfaz debe conservar:
 
 - Un león verde con melena de hojas. Es el símbolo de la marca y va en la cabecera.
 - Una cuchilla plateada que cruza la cara del león. Es lo único brillante del logo y el elemento más memorable: la app lo usará como línea de corte.
-- Un fondo casi negro con verde eléctrico y rojo ámbar en el subtítulo "& Proyecto Ámbar". El rojo se reserva para alertas y para la marca de Ámbar, no para decorar.
+- Un fondo casi negro con verde eléctrico y un subtítulo "CORTE SAKIRA 2 & Proyecto Ámbar" en rojo ámbar. La marca muestra siempre ambos nombres: CORTE SAKIRA 2 y Proyecto Ámbar.
 
 Dirección elegida: **taller de corte de precisión**. Oscuro, sobrio, con una sola pieza de brillo (la línea plateada). No es un panel genérico verde. Es una herramienta de planta que se ve cuidada.
 
@@ -29,7 +29,8 @@ Reglas:
 
 - Texto principal `#C7D2CC` sobre `#0C1410`: contraste de unos 12:1. Pasa AAA.
 - El verde `#3DD65A` solo marca lo que se puede tocar o lo que está activo. Nunca decora.
-- El rojo solo aparece cuando algo requiere atención. Si todo está en alerta, nada lo está.
+- El rojo ámbar tiene dos usos: el nombre "Proyecto Ámbar" en la marca, y las alertas. Para que la alerta no se confunda con la marca, la alerta es siempre un bloque con fondo rojo tenue, borde y texto explícito ("Duplicado", "Sin operario"), nunca solo un texto rojo.
+- Si todo está en alerta, nada lo está.
 - Modo supervisor en reporte o impresión: versión clara con el mismo verde profundo sobre papel `#F4F7F5`. Se decide en la Fase 3, según cómo lo usen en la oficina.
 
 ## 3. Tipografía
@@ -99,7 +100,7 @@ Estructura: no hay pasos numerados. Las pantallas no son una secuencia, así que
 
 ## 5. Principios
 
-1. **El logo es la única ilustración.** Aparece en la cabecera a tamaño pequeño y como icono del navegador. No se repite en el fondo ni en las tarjetas.
+1. **El logo es la única ilustración.** La cabecera muestra el león y el texto "CORTE SAKIRA 2 & Proyecto Ámbar" a tamaño pequeño; el icono del navegador es solo el león. No se repite en el fondo ni en las tarjetas.
 2. **La cuchilla es el único brillo.** Una línea plateada de 1 px separa la cabecera del contenido. Es el gesto de marca. No se usan degradados como decoración.
 3. **Las cifras mandan.** Piezas, totales y estado se leen antes que cualquier etiqueta.
 4. **Ninguna pantalla depende del color solo.** Cada estado tiene texto además del color ("Duplicado", "Sin operario"), para planta con daltonismo o pantalla con mal brillo.
@@ -111,7 +112,7 @@ Estructura: no hay pasos numerados. Las pantallas no son una secuencia, así que
 
 Lo que hoy se ve genérico y se corrige:
 
-- `web/app.py`: la cabecera usa `✳` y el texto "CORTE **SK2**". Se reemplaza por el logo. Se quita el eyebrow "CORTE · SAKIRA 2" en mayúsculas sobre cada título.
+- `web/app.py`: la cabecera usa `✳` y el texto "CORTE **SK2**". Se reemplaza por el lockup del logo: león, "CORTE SAKIRA 2" en Condensed 700 y "& Proyecto Ámbar" en rojo ámbar debajo, en versión pequeña. Se quita el eyebrow "CORTE · SAKIRA 2" en mayúsculas sobre cada título, porque la cabecera ya dice el nombre.
 - `web/style.css`: el tema es claro y verde pálido, sin identidad. Se define el tema oscuro de planta con las variables de la sección 2.
 - Tarjetas `section`, `article` y `.laser-card` tienen el mismo radio y la misma sombra. Se reducen a una sola regla por nivel: superficie sin sombra, borde 1 px, radio 8 px.
 - Botones con `#e4f5e7` y texto verde oscuro: pasan a botón de acento `#3DD65A` con texto `#0C1410`.
@@ -121,7 +122,8 @@ Lo que hoy se ve genérico y se corrige:
 - Del logo original (fondo oscuro, `.webp`) se necesita:
   - Versión del león sin el texto, en PNG con fondo transparente, para la cabecera (alto 40 px).
   - Versión cuadrada del león para favicon (32 y 180 px).
-  - Versión completa del logotipo para pantalla de inicio de sesión, con "& Proyecto Ámbar" sí o no, según la decisión de la sección 9.
+  - Versión completa del logotipo, con "CORTE SAKIRA 2 & Proyecto Ámbar", para la pantalla de inicio de sesión.
+  - Versión del lockup pequeño (león + textos) para la cabecera, en PNG 2x.
 - Idealmente se vectoriza el león (SVG). Si no, se exporta en 2x desde el original.
 - Dónde se guardan: `web/static/` con `logo-mark.png`, `logo-full.png` y `favicon.png`. Se sirven desde FastAPI como el CSS.
 
@@ -140,9 +142,12 @@ Antes de codificar se revisó el plan contra un diseño genérico de app de prod
 
 ## 10. Decisiones pendientes
 
-- [ ] ¿El logo debe llevar "& Proyecto Ámbar"? Ámbar es otro proyecto en la memoria de trabajo; la app es de CORTE SK2. Propuesta: la app muestra solo "CORTE SAKIRA 2" y el texto de Ámbar se omite.
+Decidido: la marca muestra "CORTE SAKIRA 2 & Proyecto Ámbar" en la cabecera y en el inicio de sesión.
+
+Pendientes:
+
 - [ ] ¿Modo oscuro para todo, o modo claro para el reporte impreso? Propuesta: oscuro en estación y resumen, claro en reporte.
-- [ ] ¿Se entrega el logo vectorizado o basta un PNG en 2x?
+- [ ] ¿Se entrega el logo vectorizado o basta un PNG en 2x? Propuesta: PNG en 2x ahora, SVG cuando haya presupuesto para vectorizar.
 
 ## 11. Orden de implementación
 
