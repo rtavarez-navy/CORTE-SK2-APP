@@ -118,7 +118,7 @@ En la barra inferior, un texto que cambia según el estado de la última acción
 | Ctrl+C / Ctrl+V | Copiar y pegar un valor de celda |
 | Inicio / Fin | Primera o última celda de la fila |
 
-Pegar desde una hoja de cálculo de Google Sheets (texto separado por tabulaciones) crea varias filas. Eso ahorra captura y permite migrar un día del sheet en un solo paso.
+Pegar desde una hoja de cálculo de Google Sheets (texto separado por tabulaciones) crea varias filas. Eso ahorra captura y permite migrar un día del sheet en un solo paso. Solo el supervisor puede pegar; para el operario, Ctrl+V queda desactivado y la barra de estado indica que pegar lo hace el supervisor.
 
 Las celdas bloqueadas (filas de otro operario, columnas calculadas) se pueden seleccionar para leer la fórmula o el valor, pero no escribir. Al intentar escribir, la barra de estado dice "Esta celda no se puede editar" en lugar de no responder.
 
@@ -210,4 +210,4 @@ Decidido:
 - Las pestañas del supervisor muestran todos los láseres que tengan al menos una pieza en la semana que está viendo. Un láser sin piezas esa semana no aparece como pestaña.
 
 Pendiente:
-- [ ] ¿Pegar desde Google Sheets se permite al operario, o solo al supervisor?
+Decidido: pegar desde Google Sheets lo hace solo el supervisor.
